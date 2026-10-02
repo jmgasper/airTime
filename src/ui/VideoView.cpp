@@ -6,7 +6,11 @@
 
 #include "VideoView.h"
 
+#include <algorithm>
 #include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include <Bitmap.h>
 #include <InterfaceDefs.h>
@@ -33,7 +37,13 @@ VideoView::VideoView(BRect frame, const BMessenger& target)
 	fAudioOnly(false),
 	fFullScreen(false),
 	fComposeTime(0),
-	fDrawTime(0)
+	fDrawTime(0),
+	fDirectConnected(false),
+	fDirectAllowed(getenv("AIRTIME_NO_DIRECT") == NULL),
+	fDirectUsed(false),
+	fCovered(false),
+	fDirectBits(NULL),
+	fDirectBytesPerRow(0)
 {
 	fBitmaps[0] = NULL;
 	fBitmaps[1] = NULL;
@@ -55,6 +65,7 @@ VideoView::AttachedToWindow()
 {
 	BView::AttachedToWindow();
 	MakeFocus(true);
+	UpdateWindowOrigin();
 }
 
 
@@ -133,6 +144,29 @@ void
 VideoView::SetFullScreen(bool fullScreen)
 {
 	fFullScreen = fullScreen;
+	if (!fullScreen)
+		SetCoveredBottom(-1);
+}
+
+
+void
+VideoView::SetCoveredBottom(float top)
+{
+	BRect video = VideoFrame();
+	int rows = 0;
+	if (top >= 0 && top <= video.bottom)
+		rows = (int)(video.bottom - top + 1);
+	{
+		// A child view over the picture: the frame buffer copy would paint
+		// over it, so the server draws while it is there.
+		std::lock_guard<std::mutex> lock(fDirectLock);
+		fCovered = top >= 0;
+	}
+	{
+		std::lock_guard<std::mutex> render(fRenderLock);
+		fSubtitles.SetBottomInset(rows);
+	}
+	Refresh();
 }
 
 
@@ -236,6 +270,13 @@ VideoView::DisplayFrame(const VideoFramePtr& frame)
 	bigtime_t composed = system_time();
 	fComposeTime = (fComposeTime * 15 + (composed - start)) / 16;
 
+	if (_DrawDirect(fBitmaps[next], rect)) {
+		fCurrent = next;
+		fDirty = false;
+		fDrawTime = (fDrawTime * 15 + (system_time() - composed)) / 16;
+		return true;
+	}
+
 	if (LockLooperWithTimeout(40000) != B_OK)
 		return false;
 	bigtime_t locked = system_time();
@@ -252,6 +293,104 @@ VideoView::DisplayFrame(const VideoFramePtr& frame)
 	fDirty = false;
 	UnlockLooper();
 	fDrawTime = (fDrawTime * 15 + (system_time() - locked)) / 16;
+	return true;
+}
+
+
+void
+VideoView::DirectConnected(direct_buffer_info* info)
+{
+	std::lock_guard<std::mutex> lock(fDirectLock);
+	switch (info->buffer_state & B_DIRECT_MODE_MASK) {
+		case B_DIRECT_START:
+		case B_DIRECT_MODIFY:
+		{
+			if (getenv("AIRTIME_TRACE") != NULL) {
+				fprintf(stderr, "airTime: direct %s, %d bpp, format %#x, "
+					"%" B_PRIu32 " clips, bits %p\n",
+					(info->buffer_state & B_DIRECT_MODE_MASK) == B_DIRECT_START
+						? "start" : "modify", (int)info->bits_per_pixel,
+					(unsigned)info->pixel_format, info->clip_list_count,
+					info->bits);
+			}
+			bool usable = info->bits != NULL && info->bits_per_pixel == 32
+				&& (info->pixel_format == B_RGB32
+					|| info->pixel_format == B_RGBA32)
+				&& info->layout == B_BUFFER_NONINTERLEAVED
+				&& info->orientation == B_BUFFER_TOP_TO_BOTTOM;
+			fDirectConnected = usable;
+			fDirectBits = (uint8*)info->bits;
+			fDirectBytesPerRow = info->bytes_per_row;
+			fDirectWindowBounds = info->window_bounds;
+			fDirectClips.assign(info->clip_list,
+				info->clip_list + info->clip_list_count);
+			break;
+		}
+		case B_DIRECT_STOP:
+			if (getenv("AIRTIME_TRACE") != NULL)
+				fprintf(stderr, "airTime: direct stop\n");
+			fDirectConnected = false;
+			fDirectBits = NULL;
+			fDirectClips.clear();
+			break;
+	}
+}
+
+
+void
+VideoView::SetDirectAllowed(bool allowed)
+{
+	fDirectAllowed = allowed && getenv("AIRTIME_NO_DIRECT") == NULL;
+}
+
+
+void
+VideoView::UpdateWindowOrigin()
+{
+	// Called with the window locked.
+	BPoint origin = ConvertToScreen(BPoint(0, 0))
+		- Window()->ConvertToScreen(BPoint(0, 0));
+	std::lock_guard<std::mutex> lock(fDirectLock);
+	fWindowOrigin = origin;
+}
+
+
+bool
+VideoView::_DrawDirect(BBitmap* bitmap, BRect rect)
+{
+	if (!fDirectAllowed) {
+		fDirectUsed = false;
+		return false;
+	}
+	std::lock_guard<std::mutex> lock(fDirectLock);
+	if (!fDirectConnected || fCovered || fDirectBits == NULL) {
+		fDirectUsed = false;
+		return false;
+	}
+
+	// The picture's place on the screen.
+	int left = fDirectWindowBounds.left + (int)(fWindowOrigin.x + rect.left);
+	int top = fDirectWindowBounds.top + (int)(fWindowOrigin.y + rect.top);
+	int width = rect.IntegerWidth() + 1;
+	int height = rect.IntegerHeight() + 1;
+	const uint8* source = (const uint8*)bitmap->Bits();
+	int32 sourceStride = bitmap->BytesPerRow();
+
+	for (const clipping_rect& clip : fDirectClips) {
+		int x0 = std::max(left, (int)clip.left);
+		int y0 = std::max(top, (int)clip.top);
+		int x1 = std::min(left + width - 1, (int)clip.right);
+		int y1 = std::min(top + height - 1, (int)clip.bottom);
+		if (x1 < x0 || y1 < y0)
+			continue;
+		size_t bytes = (size_t)(x1 - x0 + 1) * 4;
+		for (int y = y0; y <= y1; y++) {
+			memcpy(fDirectBits + (size_t)y * fDirectBytesPerRow + x0 * 4,
+				source + (size_t)(y - top) * sourceStride + (x0 - left) * 4,
+				bytes);
+		}
+	}
+	fDirectUsed = true;
 	return true;
 }
 
@@ -392,6 +531,7 @@ VideoView::FrameResized(float width, float height)
 		std::lock_guard<std::mutex> lock(fGeometryLock);
 		fVideoRect = _VideoRectFor(Bounds());
 	}
+	UpdateWindowOrigin();
 	fDirty = true;
 	Invalidate();
 }

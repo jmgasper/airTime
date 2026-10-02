@@ -31,7 +31,7 @@ CXXFLAGS += -std=c++17 -Wall -Wextra -Wno-multichar -Wno-unused-parameter \
 ENGINE_SRC = $(wildcard src/engine/*.cpp)
 UI_SRC = $(wildcard src/ui/*.cpp) $(wildcard src/*.cpp)
 APP_OBJ = $(ENGINE_SRC:%.cpp=$(BUILD)/%.o) $(UI_SRC:%.cpp=$(BUILD)/%.o)
-APP_LIBS = -lbe -lmedia -ltracker -ltranslation -llocalestub $(FFMPEG_LIBS)
+APP_LIBS = -lbe -lgame -lmedia -ltracker -ltranslation -llocalestub $(FFMPEG_LIBS)
 
 .PHONY: all engine package clean check check-host icon
 

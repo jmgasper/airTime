@@ -22,6 +22,8 @@ namespace airtime {
 SubtitleRenderer::SubtitleRenderer()
 	:
 	fScale(1.0f),
+	fBottomInset(0),
+	fKeyInset(0),
 	fKeyWidth(0),
 	fKeyHeight(0),
 	fKeyScale(0),
@@ -333,10 +335,11 @@ SubtitleRenderer::Render(const std::vector<SubtitleEventPtr>& events,
 	for (const SubtitleEventPtr& event : events)
 		key.push_back(event->id);
 	if (key == fKey && width == fKeyWidth && height == fKeyHeight
-		&& fScale == fKeyScale) {
+		&& fScale == fKeyScale && fBottomInset == fKeyInset) {
 		return fOverlays;
 	}
 	fKey = key;
+	fKeyInset = fBottomInset;
 	fKeyWidth = width;
 	fKeyHeight = height;
 	fKeyScale = fScale;
@@ -345,7 +348,7 @@ SubtitleRenderer::Render(const std::vector<SubtitleEventPtr>& events,
 	float fontSize = std::max(13.0f, height * 0.052f * fScale);
 	int marginX = (int)(width * 0.05f);
 	int marginY = (int)(height * 0.05f);
-	int bottomUsed = 0;
+	int bottomUsed = std::max(0, fBottomInset - marginY + 8);
 	int topUsed = 0;
 
 	// Events further down the list are newer; stack them above the older

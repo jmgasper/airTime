@@ -64,6 +64,12 @@ struct PlayerStats {
 	bigtime_t		decodeTime;		// average per picture
 	bigtime_t		composeTime;
 	bigtime_t		drawTime;
+	int				demuxPhase;
+	int				decodePhase;
+	int				presentPhase;
+	int				scanSeeks;
+	bigtime_t		scanShown;
+	bool			scanAwaiting;
 };
 
 
@@ -273,6 +279,10 @@ private:
 			bigtime_t			fScanStepTime;
 			bool				fScanAwaitingFrame;
 			bigtime_t			fScanShownPts;
+			// Scanning reads one key frame per seek, then ends the stream so
+			// the decoder lets go of it at once.
+			bool				fScanPacketSent;
+			bool				fScanHitEnd;
 			float				fVolume;
 			bool				fMuted;
 
@@ -284,7 +294,13 @@ private:
 			double				fDisplayRate;
 			bigtime_t			fLastAVOffset;
 			std::atomic<bigtime_t> fDecodeTime;
+			// What the threads are doing, for diagnosis.
+			std::atomic<int>	fDemuxPhase;
+			std::atomic<int>	fDecodePhase;
+			std::atomic<int>	fPresentPhase;
+			std::atomic<int>	fScanSeeks;
 };
+
 
 }	// namespace airtime
 

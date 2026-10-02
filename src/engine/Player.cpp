@@ -150,6 +150,8 @@ Player::Player(const BMessenger& target)
 	fScanStepTime(0),
 	fScanAwaitingFrame(false),
 	fScanShownPts(kNoTime),
+	fScanPacketSent(false),
+	fScanHitEnd(false),
 	fVolume(1.0f),
 	fMuted(false),
 	fSink(NULL),
@@ -159,7 +161,11 @@ Player::Player(const BMessenger& target)
 	fRateWindowFrames(0),
 	fDisplayRate(0),
 	fLastAVOffset(0),
-	fDecodeTime(0)
+	fDecodeTime(0),
+	fDemuxPhase(0),
+	fDecodePhase(0),
+	fPresentPhase(0),
+	fScanSeeks(0)
 {
 	fCaptionTrack.SetMaxOpenDuration(8000000);
 }
@@ -1207,6 +1213,15 @@ Player::Stats()
 	stats.audioQueued = fAudioQueue.Count();
 	stats.framesQueued = fFrames.Count();
 	stats.decodeTime = fDecodeTime;
+	stats.demuxPhase = fDemuxPhase;
+	stats.decodePhase = fDecodePhase;
+	stats.presentPhase = fPresentPhase;
+	stats.scanSeeks = fScanSeeks;
+	{
+		std::lock_guard<std::mutex> lock(fLock);
+		stats.scanShown = fScanShownPts == kNoTime ? -1 : fScanShownPts;
+		stats.scanAwaiting = fScanAwaitingFrame;
+	}
 	stats.composeTime = stats.drawTime = 0;
 	VideoSink* sink;
 	{
@@ -1321,6 +1336,8 @@ Player::_PerformSeek()
 	{
 		std::lock_guard<std::mutex> lock(fLock);
 		fEndOfFile = false;
+		fScanPacketSent = false;
+		fScanHitEnd = false;
 		fVideoSkipSerial = accurate ? videoSerial : -1;
 		fVideoSkipTime = skipBefore;
 		fVideoFinishedSerial = -1;
@@ -1394,29 +1411,48 @@ Player::_DemuxLoop()
 	bigtime_t lastPrune = 0;
 
 	while (!fQuit) {
-		bool seek, endOfFile, scanning;
+		bool seek, endOfFile, scanning, scanDone;
 		{
 			std::lock_guard<std::mutex> lock(fLock);
 			seek = fSeekRequested;
 			endOfFile = fEndOfFile;
 			scanning = fScanning;
+			scanDone = fScanPacketSent || fVideoStream < 0;
 		}
 		if (seek) {
+			fDemuxPhase = 1;
 			_PerformSeek();
 			continue;
 		}
 
+		fDemuxPhase = 2;
+		if (scanning && scanDone) {
+			// The key frame for this step is on its way; nothing more to
+			// read until the next seek.
+			std::unique_lock<std::mutex> lock(fLock);
+			if (!fSeekRequested && !fQuit)
+				fWakeUp.wait_for(lock, std::chrono::milliseconds(10));
+			continue;
+		}
 		if (endOfFile || _QueuesFull()) {
+			fDemuxPhase = 3;
 			std::unique_lock<std::mutex> lock(fLock);
 			if (!fSeekRequested && !fQuit)
 				fWakeUp.wait_for(lock, std::chrono::milliseconds(10));
 			continue;
 		}
 
+		fDemuxPhase = 4;
 		int result = av_read_frame(fFormat, packet);
+		fDemuxPhase = 5;
 		if (result < 0) {
 			if (result == AVERROR_EOF || avio_feof(fFormat->pb)) {
 				TRACE("airTime: end of file\n");
+				if (scanning) {
+					std::lock_guard<std::mutex> lock(fLock);
+					fScanHitEnd = true;
+					fScanPacketSent = true;
+				}
 				if (fVideoStream >= 0)
 					fVideoQueue.PutEndOfStream(fVideoStream);
 				if (fAudioStream >= 0)
@@ -1436,7 +1472,12 @@ Player::_DemuxLoop()
 		if (index == fVideoStream) {
 			if (scanning && (packet->flags & AV_PKT_FLAG_KEY) == 0)
 				av_packet_unref(packet);
-			else
+			else if (scanning) {
+				_RouteVideoPacket(packet);
+				fVideoQueue.PutEndOfStream(fVideoStream);
+				std::lock_guard<std::mutex> lock(fLock);
+				fScanPacketSent = true;
+			} else
 				_RouteVideoPacket(packet);
 		} else if (index == fAudioStream) {
 			if (scanning) {
@@ -1596,7 +1637,9 @@ Player::_VideoDecodeLoop()
 
 		VideoFramePtr frame;
 		bigtime_t decodeStart = system_time();
+		fDecodePhase = 1;
 		status_t status = decoder->Decode(frame);
+		fDecodePhase = 2;
 		if (fQuit)
 			break;
 		if (status == B_OK) {
@@ -1628,6 +1671,7 @@ Player::_VideoDecodeLoop()
 			decoder->SetSkipBefore(0);
 			lastDropped.reset();
 			int serial = frame->serial;
+			fDecodePhase = 3;
 			fFrames.Push(frame, [this, serial, hardwareWanted]() {
 				return !fQuit && fVideoQueue.Serial() == serial
 					&& hardwareWanted == fHardwareDecoding;
@@ -1757,11 +1801,10 @@ Player::_ScanStep()
 		return false;
 	bigtime_t now = system_time();
 	bool hasVideo = fVideoStream >= 0;
-	if (hasVideo && fScanAwaitingFrame && now - fScanStepTime < 600000) {
-		// Show the last key frame asked for before asking for another,
-		// unless the end came first.
-		if (fVideoFinishedSerial != fVideoQueue.Serial())
-			return false;
+	if (hasVideo && fScanAwaitingFrame && now - fScanStepTime < 600000
+		&& !fScanHitEnd) {
+		// Show the last key frame asked for before asking for another.
+		return false;
 	}
 	if (fScanStepTime != 0 && now - fScanStepTime < kScanStepInterval)
 		return false;
@@ -1771,8 +1814,7 @@ Player::_ScanStep()
 	fScanPosition += (bigtime_t)(elapsed * fRate);
 
 	bool atEnd = (fDuration > 0 && fScanPosition >= fDuration)
-		|| (hasVideo && fScanAwaitingFrame
-			&& fVideoFinishedSerial == fVideoQueue.Serial() && fRate > 0);
+		|| (fScanHitEnd && fRate > 0);
 	if (fRate > 0 && atEnd) {
 		// Fast forward ran into the end: stop on the last picture.
 		fScanning = false;
@@ -1805,6 +1847,7 @@ Player::_ScanStep()
 			return false;
 	}
 	_RequestSeekLocked(fScanPosition, false, fRate > 0 ? 1 : -1);
+	fScanSeeks++;
 	// Position() reports the scan position, not the seek target.
 	fPositionPending = false;
 	fScanAwaitingFrame = hasVideo;

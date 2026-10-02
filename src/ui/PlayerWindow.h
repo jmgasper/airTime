@@ -6,9 +6,9 @@
 #define AIRTIME_PLAYER_WINDOW_H
 
 
+#include <DirectWindow.h>
 #include <Entry.h>
 #include <Messenger.h>
-#include <Window.h>
 
 #include "Player.h"
 
@@ -27,7 +27,7 @@ class MetalView;
 class VideoView;
 
 
-class PlayerWindow : public BWindow {
+class PlayerWindow : public BDirectWindow {
 public:
 								PlayerWindow(BRect frame);
 	virtual						~PlayerWindow();
@@ -45,6 +45,7 @@ public:
 	virtual	void				MenusBeginning();
 	virtual	void				Zoom(BPoint origin, float width, float height);
 	virtual	void				WindowActivated(bool active);
+	virtual	void				DirectConnected(direct_buffer_info* info);
 
 	virtual	BHandler*			ResolveSpecifier(BMessage* message, int32 index,
 									BMessage* specifier, int32 what,

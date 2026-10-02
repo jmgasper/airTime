@@ -41,6 +41,9 @@ public:
 
 			void				SetScale(float scale);
 			float				Scale() const { return fScale; }
+			// Rows at the bottom of the picture that something else covers
+			// (the full screen controller); bottom subtitles go above them.
+			void				SetBottomInset(int rows) { fBottomInset = rows; }
 
 			// Returns overlays for the events; the result is reused while
 			// the events and the size stay the same.
@@ -77,6 +80,8 @@ private:
 			bool				_EnsureCanvas(int width, int height);
 
 			float				fScale;
+			int					fBottomInset;
+			int					fKeyInset;
 			std::vector<uint64>	fKey;
 			int					fKeyWidth;
 			int					fKeyHeight;

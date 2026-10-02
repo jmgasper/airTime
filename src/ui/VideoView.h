@@ -9,6 +9,7 @@
 #include <atomic>
 #include <mutex>
 
+#include <DirectWindow.h>
 #include <Messenger.h>
 #include <String.h>
 #include <View.h>
@@ -42,6 +43,16 @@ public:
 			// Draw the last picture again (subtitles or size changed).
 			void				Refresh();
 			void				SetFullScreen(bool fullScreen);
+			// The part of the view covered by the full screen controller.
+			void				SetCoveredBottom(float top);
+
+			// From the window's DirectConnected(): where the frame buffer
+			// is and which parts of the window are visible in it.
+			void				DirectConnected(direct_buffer_info* info);
+			void				SetDirectAllowed(bool allowed);
+			// Where the view sits in its window; called after layout.
+			void				UpdateWindowOrigin();
+			bool				DrawsDirectly() const { return fDirectUsed; }
 			BRect				VideoFrame();
 
 	// VideoSink, on the presentation thread
@@ -60,6 +71,7 @@ public:
 	virtual	void				MessageReceived(BMessage* message);
 
 private:
+			bool				_DrawDirect(BBitmap* bitmap, BRect rect);
 			BRect				_VideoRectFor(BRect bounds) const;
 			bool				_Compose(const VideoFramePtr& frame,
 									int index, int width, int height);
@@ -92,6 +104,19 @@ private:
 			BPoint				fLastMouse;
 			std::atomic<bigtime_t> fComposeTime;
 			std::atomic<bigtime_t> fDrawTime;
+
+			// Direct frame buffer access, guarded by fDirectLock; the window
+			// waits for a copy in progress before the buffer goes away.
+			std::mutex			fDirectLock;
+			bool				fDirectConnected;
+			std::atomic<bool>	fDirectAllowed;
+			std::atomic<bool>	fDirectUsed;
+			bool				fCovered;
+			uint8*				fDirectBits;
+			int32				fDirectBytesPerRow;
+			clipping_rect		fDirectWindowBounds;
+			std::vector<clipping_rect> fDirectClips;
+			BPoint				fWindowOrigin;
 };
 
 }	// namespace airtime

@@ -6,6 +6,7 @@
 
 #include "PlayerWindow.h"
 
+#include <dlfcn.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -134,7 +135,7 @@ static property_info sProperties[] = {
 
 PlayerWindow::PlayerWindow(BRect frame)
 	:
-	BWindow(frame, "airTime", B_TITLED_WINDOW_LOOK, B_NORMAL_WINDOW_FEEL,
+	BDirectWindow(frame, "airTime", B_TITLED_WINDOW_LOOK, B_NORMAL_WINDOW_FEEL,
 		B_ASYNCHRONOUS_CONTROLS),
 	fPlayer(NULL),
 	fHasFile(false),
@@ -211,6 +212,9 @@ PlayerWindow::~PlayerWindow()
 	fPlayer->SetVideoSink(NULL);
 	fPlayer->Close();
 	delete fPlayer;
+	// No more DirectConnected() calls into a window half taken down.
+	Hide();
+	Sync();
 	delete fSubtitlePanel;
 	if (fInspector.IsValid())
 		fInspector.SendMessage(B_QUIT_REQUESTED);
@@ -741,6 +745,7 @@ PlayerWindow::_Layout()
 		fHud->ResizeTo(hudWidth, hudHeight);
 		fHud->MoveTo(floorf((video.Width() - hudWidth) / 2),
 			video.bottom - hudHeight - 36);
+		fVideo->UpdateWindowOrigin();
 		return;
 	}
 
@@ -760,6 +765,7 @@ PlayerWindow::_Layout()
 	}
 	fVideo->MoveTo(video.LeftTop());
 	fVideo->ResizeTo(video.Width(), video.Height());
+	fVideo->UpdateWindowOrigin();
 }
 
 
@@ -780,11 +786,39 @@ PlayerWindow::_ApplySizeLimits()
 }
 
 
+/*!	air/OS's app_server knows the monitors behind the one screen; its
+	BPrivate::get_display_frame() is looked up at run time so that airTime
+	still runs where libbe does not have it, on the whole screen. */
+typedef status_t (*get_display_frame_function)(BRect frame, bool forZoom,
+	BRect& displayFrame);
+
+
+static get_display_frame_function
+display_frame_function()
+{
+	static get_display_frame_function function = NULL;
+	static bool looked = false;
+	if (!looked) {
+		looked = true;
+		function = (get_display_frame_function)dlsym(RTLD_DEFAULT,
+			"_ZN8BPrivate17get_display_frameE5BRectbRS0_");
+	}
+	return function;
+}
+
+
 BRect
 PlayerWindow::_ScreenFrame() const
 {
 	BScreen screen(const_cast<PlayerWindow*>(this));
-	return screen.Frame();
+	BRect frame = screen.Frame();
+	get_display_frame_function function = display_frame_function();
+	BRect monitor;
+	if (function != NULL && function(fFullScreen ? fSavedFrame : Frame(),
+			false, monitor) == B_OK && monitor.IsValid()) {
+		return monitor;
+	}
+	return frame;
 }
 
 
@@ -965,9 +999,11 @@ PlayerWindow::_ShowHud(bool show)
 	if (show) {
 		_Layout();
 		fHud->Show();
+		fVideo->SetCoveredBottom(fHud->Frame().top);
 		be_app->ShowCursor();
 	} else {
 		fHud->Hide();
+		fVideo->SetCoveredBottom(-1);
 		if (fFullScreen)
 			be_app->ObscureCursor();
 	}
@@ -1418,6 +1454,14 @@ PlayerWindow::QuitRequested()
 	if (be_app->CountWindows() <= 1 + (fInspector.IsValid() ? 1 : 0))
 		be_app->PostMessage(B_QUIT_REQUESTED);
 	return true;
+}
+
+
+void
+PlayerWindow::DirectConnected(direct_buffer_info* info)
+{
+	fVideo->DirectConnected(info);
+	BDirectWindow::DirectConnected(info);
 }
 
 
@@ -2014,13 +2058,17 @@ PlayerWindow::_HandleScripting(BMessage* message)
 		text.SetToFormat("position=%.3f rate=%g playing=%d scanning=%d "
 			"shown=%" B_PRId64 " dropped=%" B_PRId64 " fps=%.1f "
 			"av=%.1fms audiobuf=%.0fms vq=%d aq=%d fq=%d "
-			"decode=%.1fms compose=%.1fms draw=%.1fms",
+			"decode=%.1fms compose=%.1fms draw=%.1fms phases=%d/%d/%d "
+			"scanseeks=%d scanshown=%.3f awaiting=%d direct=%d hud=%d",
 			fPlayer->Position() / 1e6, fPlayer->Rate(), fPlayer->IsPlaying(),
 			fPlayer->IsScanning(), stats.framesShown, stats.framesDropped,
 			stats.displayRate, stats.avOffset / 1000.0,
 			stats.audioBuffered / 1000.0, stats.videoQueued,
 			stats.audioQueued, stats.framesQueued, stats.decodeTime / 1000.0,
-			stats.composeTime / 1000.0, stats.drawTime / 1000.0);
+			stats.composeTime / 1000.0, stats.drawTime / 1000.0,
+			stats.demuxPhase, stats.decodePhase, stats.presentPhase,
+			stats.scanSeeks, stats.scanShown / 1e6, stats.scanAwaiting,
+			fVideo->DrawsDirectly(), fHudShown);
 		reply.AddString("result", text);
 	} else if (name == "Tracks") {
 		BString text;
