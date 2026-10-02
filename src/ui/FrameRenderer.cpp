@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <thread>
 
@@ -107,15 +108,36 @@ FrameRenderer::_Prepare(const AVFrame* frame, int width, int height, bool hdr)
 		return false;
 
 	// Bicubic when enlarging looks better; area averaging when shrinking a
-	// lot keeps fine detail from flickering.
+	// lot keeps fine detail from flickering. On the ARM boards swscale's
+	// fast bilinear path is the one with vector code, and the others cost
+	// twice as much per picture.
 	int flags = SWS_BICUBIC;
 	if (width < frame->width / 2)
 		flags = SWS_AREA;
 	else if (width <= frame->width)
 		flags = SWS_BILINEAR;
+#if defined(__aarch64__)
+	if (width != frame->width || height != frame->height)
+		flags = SWS_FAST_BILINEAR;
+#endif
+	const char* forced = getenv("AIRTIME_SWS_FLAGS");
+	if (forced != NULL) {
+		if (strcmp(forced, "fast") == 0)
+			flags = SWS_FAST_BILINEAR;
+		else if (strcmp(forced, "bilinear") == 0)
+			flags = SWS_BILINEAR;
+		else if (strcmp(forced, "area") == 0)
+			flags = SWS_AREA;
+		else if (strcmp(forced, "point") == 0)
+			flags = SWS_POINT;
+		else if (strcmp(forced, "bicubic") == 0)
+			flags = SWS_BICUBIC;
+	}
 
 	unsigned cpus = std::thread::hardware_concurrency();
 	int threads = cpus > 8 ? 8 : cpus > 0 ? (int)cpus : 4;
+	if (getenv("AIRTIME_SWS_THREADS") != NULL)
+		threads = atoi(getenv("AIRTIME_SWS_THREADS"));
 	av_opt_set_int(fContext, "srcw", frame->width, 0);
 	av_opt_set_int(fContext, "srch", frame->height, 0);
 	av_opt_set_int(fContext, "src_format", frame->format, 0);

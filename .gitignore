@@ -1,8 +1,8 @@
+artifacts/
+build-arm64/
 build-haiku/
 build-host/
-build-arm64/
 build-x86_64/
-artifacts/
-*.o
 *.d
+*.o
 __pycache__/
