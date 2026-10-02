@@ -6,7 +6,6 @@
 
 #include "PlayerWindow.h"
 
-#include <dlfcn.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -33,6 +32,7 @@
 #include "Languages.h"
 #include "Messages.h"
 #include "Metal.h"
+#include "Screens.h"
 #include "Settings.h"
 #include "VideoView.h"
 
@@ -129,6 +129,8 @@ static property_info sProperties[] = {
 		{B_BOOL_TYPE}},
 	{"Loop", {B_GET_PROPERTY, B_SET_PROPERTY, 0}, {B_DIRECT_SPECIFIER, 0},
 		"Whether the movie starts over at its end.", 0, {B_BOOL_TYPE}},
+	{"Frame", {B_GET_PROPERTY, B_SET_PROPERTY, 0}, {B_DIRECT_SPECIFIER, 0},
+		"The window's frame on the screen.", 0, {B_RECT_TYPE}},
 	{0}
 };
 
@@ -786,39 +788,10 @@ PlayerWindow::_ApplySizeLimits()
 }
 
 
-/*!	air/OS's app_server knows the monitors behind the one screen; its
-	BPrivate::get_display_frame() is looked up at run time so that airTime
-	still runs where libbe does not have it, on the whole screen. */
-typedef status_t (*get_display_frame_function)(BRect frame, bool forZoom,
-	BRect& displayFrame);
-
-
-static get_display_frame_function
-display_frame_function()
-{
-	static get_display_frame_function function = NULL;
-	static bool looked = false;
-	if (!looked) {
-		looked = true;
-		function = (get_display_frame_function)dlsym(RTLD_DEFAULT,
-			"_ZN8BPrivate17get_display_frameE5BRectbRS0_");
-	}
-	return function;
-}
-
-
 BRect
 PlayerWindow::_ScreenFrame() const
 {
-	BScreen screen(const_cast<PlayerWindow*>(this));
-	BRect frame = screen.Frame();
-	get_display_frame_function function = display_frame_function();
-	BRect monitor;
-	if (function != NULL && function(fFullScreen ? fSavedFrame : Frame(),
-			false, monitor) == B_OK && monitor.IsValid()) {
-		return monitor;
-	}
-	return frame;
+	return monitor_frame(fFullScreen ? fSavedFrame : Frame());
 }
 
 
@@ -2120,6 +2093,17 @@ PlayerWindow::_HandleScripting(BMessage* message)
 			if (status == B_OK) {
 				settings().hardwareDecoding = enabled;
 				fPlayer->SetHardwareDecoding(enabled);
+			}
+		}
+	} else if (name == "Frame") {
+		if (get)
+			reply.AddRect("result", Frame());
+		else {
+			BRect frame;
+			status = message->FindRect("data", &frame);
+			if (status == B_OK && !fFullScreen) {
+				MoveTo(frame.LeftTop());
+				ResizeTo(frame.Width(), frame.Height());
 			}
 		}
 	} else if (name == "Loop") {

@@ -23,6 +23,7 @@
 #include "FFmpeg.h"
 #include "Messages.h"
 #include "PlayerWindow.h"
+#include "Screens.h"
 #include "Settings.h"
 #include "Tracks.h"
 #include "VideoDecoder.h"
@@ -72,9 +73,12 @@ App::~App()
 BRect
 App::_NextFrame()
 {
+	// On the monitor the user is looking at (where the pointer is), a little
+	// further down and right for every window.
+	BRect monitor = monitor_frame_at_pointer();
 	BRect frame(0, 0, 535, 400);
 	float offset = 24.0f * (fWindowCount % 8);
-	frame.OffsetTo(80 + offset, 80 + offset);
+	frame.OffsetTo(monitor.left + 80 + offset, monitor.top + 60 + offset);
 	fWindowCount++;
 	return frame;
 }
