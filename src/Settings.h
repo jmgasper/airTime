@@ -21,6 +21,9 @@ struct Settings {
 	// --no-hardware: off for this run only, not saved.
 	bool		noHardwareThisRun;
 	bool		snapToAspect;
+	// Draw straight into the frame buffer at the screen's density where
+	// the app_server allows it (B_DIRECT_DEVICE_PIXELS).
+	bool		devicePixels;
 	bool		autoPlay;
 	int32		timeDisplay;
 	BString		audioLanguage;		// "" = the file's default

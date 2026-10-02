@@ -58,6 +58,7 @@ enum {
 	kMsgToggleHardware		= 'hwdc',
 	kMsgToggleTimeDisplay	= 'tdsp',
 	kMsgToggleSnap			= 'snap',
+	kMsgToggleDevicePixels	= 'dpix',
 	kMsgShowInspector		= 'insp',
 	kMsgPulse				= 'puls',
 	kMsgOpenFile			= 'open',

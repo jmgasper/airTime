@@ -72,6 +72,7 @@ private:
 			void				_ShowHud(bool show);
 
 			void				_Pulse();
+			void				_ApplyDevicePixels();
 			void				_UpdateControls();
 			void				_UpdateInspector();
 			void				_ShowMessage(const char* format, ...);

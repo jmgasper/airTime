@@ -47,6 +47,16 @@ static const uint32 kDirectDevicePixels = 0x00000400;
 #endif
 
 
+// The flag, unless View ▸ Draw at Screen Density or AIRTIME_NO_DEVICE_PIXELS
+// says otherwise.
+static uint32
+device_pixels_flag()
+{
+	return airtime::settings().devicePixels
+		&& getenv("AIRTIME_NO_DEVICE_PIXELS") == NULL ? kDirectDevicePixels : 0;
+}
+
+
 namespace airtime {
 
 static const float kBorder = 8;
@@ -136,6 +146,9 @@ static property_info sProperties[] = {
 		{B_FLOAT_TYPE}},
 	{"SubtitleFile", {B_SET_PROPERTY, 0}, {B_DIRECT_SPECIFIER, 0},
 		"Adds a subtitle file.", 0, {B_STRING_TYPE}},
+	{"DevicePixels", {B_GET_PROPERTY, B_SET_PROPERTY, 0},
+		{B_DIRECT_SPECIFIER, 0}, "Whether to draw into the frame buffer at the "
+		"screen's density where the app_server allows it.", 0, {B_BOOL_TYPE}},
 	{"HardwareDecoding", {B_GET_PROPERTY, B_SET_PROPERTY, 0},
 		{B_DIRECT_SPECIFIER, 0}, "Whether hardware decoders may be used.", 0,
 		{B_BOOL_TYPE}},
@@ -150,7 +163,7 @@ static property_info sProperties[] = {
 PlayerWindow::PlayerWindow(BRect frame)
 	:
 	BDirectWindow(frame, "airTime", B_TITLED_WINDOW_LOOK, B_NORMAL_WINDOW_FEEL,
-		B_ASYNCHRONOUS_CONTROLS | kDirectDevicePixels),
+		B_ASYNCHRONOUS_CONTROLS | device_pixels_flag()),
 	fPlayer(NULL),
 	fHasFile(false),
 	fSeekOnOpen(-1),
@@ -393,6 +406,7 @@ PlayerWindow::_BuildMenus()
 	fViewMenu->AddSeparatorItem();
 	fViewMenu->AddItem(item("Keep Proportions When Resizing", kMsgToggleSnap));
 	fViewMenu->AddItem(item("Always on Top", kMsgToggleOnTop));
+	fViewMenu->AddItem(item("Draw at Screen Density", kMsgToggleDevicePixels));
 	fViewMenu->AddSeparatorItem();
 	fSubtitleSizeMenu = new BMenu("Subtitle Size");
 	const struct { const char* label; float scale; } kSizes[] = {
@@ -594,6 +608,9 @@ PlayerWindow::_UpdateMenus()
 				break;
 			case kMsgToggleSnap:
 				menuItem->SetMarked(settings().snapToAspect);
+				break;
+			case kMsgToggleDevicePixels:
+				menuItem->SetMarked(settings().devicePixels);
 				break;
 			case kMsgToggleOnTop:
 				menuItem->SetMarked(fAlwaysOnTop);
@@ -1021,6 +1038,17 @@ PlayerWindow::_UpdateControls()
 	fHud->SetPlaying(playing);
 	fControls->SetRate(rate, scanning);
 	fHud->SetRate(rate, scanning);
+}
+
+
+void
+PlayerWindow::_ApplyDevicePixels()
+{
+	// Called with the window locked. An app_server that does not know the
+	// flag refuses it; the window then stays as it was.
+	uint32 flags = (Flags() & ~kDirectDevicePixels) | device_pixels_flag();
+	if (flags != Flags())
+		SetFlags(flags);
 }
 
 
@@ -1762,6 +1790,11 @@ PlayerWindow::MessageReceived(BMessage* message)
 			if (settings().snapToAspect)
 				_SnapToAspect();
 			break;
+		case kMsgToggleDevicePixels:
+			settings().devicePixels = !settings().devicePixels;
+			settings().Save();
+			_ApplyDevicePixels();
+			break;
 		case kMsgToggleHardware:
 			settings().hardwareDecoding = !settings().hardwareDecoding
 				|| settings().noHardwareThisRun;
@@ -2141,6 +2174,18 @@ PlayerWindow::_HandleScripting(BMessage* message)
 				settings().hardwareDecoding = enabled;
 				settings().noHardwareThisRun = false;
 				fPlayer->SetHardwareDecoding(enabled);
+			}
+		}
+	} else if (name == "DevicePixels") {
+		if (get)
+			reply.AddBool("result", settings().devicePixels);
+		else {
+			bool enabled;
+			status = message->FindBool("data", &enabled);
+			if (status == B_OK) {
+				settings().devicePixels = enabled;
+				settings().Save();
+				_ApplyDevicePixels();
 			}
 		}
 	} else if (name == "Frame") {

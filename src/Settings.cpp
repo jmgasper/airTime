@@ -35,6 +35,7 @@ Settings::Settings()
 	hardwareDecoding(true),
 	noHardwareThisRun(false),
 	snapToAspect(true),
+	devicePixels(true),
 	autoPlay(true),
 	timeDisplay(0),
 	inspectorFrame(0, 0, -1, -1)
@@ -69,6 +70,7 @@ Settings::Load()
 	message.FindBool("loop", &loop);
 	message.FindBool("hardware decoding", &hardwareDecoding);
 	message.FindBool("snap to aspect", &snapToAspect);
+	message.FindBool("device pixels", &devicePixels);
 	message.FindBool("auto play", &autoPlay);
 	message.FindInt32("time display", &timeDisplay);
 	message.FindString("audio language", &audioLanguage);
@@ -91,6 +93,7 @@ Settings::Save() const
 	message.AddBool("loop", loop);
 	message.AddBool("hardware decoding", hardwareDecoding);
 	message.AddBool("snap to aspect", snapToAspect);
+	message.AddBool("device pixels", devicePixels);
 	message.AddBool("auto play", autoPlay);
 	message.AddInt32("time display", timeDisplay);
 	message.AddString("audio language", audioLanguage);

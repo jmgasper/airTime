@@ -35,7 +35,8 @@ it can.
   it can, and sound and picture stay together.
 * **High density screens**: on air/OS's app_server the picture is drawn
   straight into the frame buffer at the screen's own density, so a 4K film
-  on a 200% desktop keeps its detail.
+  on a 200% desktop keeps its detail (View ▸ Draw at Screen Density, on by
+  default; `AIRTIME_NO_DEVICE_PIXELS=1` turns it off for one run).
 * **Window resizing** that keeps the film's proportions once the resize
   corner is let go (View ▸ Keep Proportions), plus Half, Actual and Double
   Size and Fit to Screen (⌘0–⌘3), as QuickTime had.
