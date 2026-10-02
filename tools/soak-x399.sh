@@ -21,7 +21,7 @@ while IFS= read -r film; do
 		hey \$A get Decoder of Window 0 | grep result
 		hey \$A get Stats of Window 0 | grep result
 		d=\$(hey \$A get Duration of Window 0 | sed -n 's/.*: \\([0-9]*\\) .*/\\1/p')
-		hey \$A set Position of Window 0 to \$((d / 2)) >/dev/null; sleep 5
+		hey \$A set Position of Window 0 to \\\"\$((d / 2000000))\\\" >/dev/null; sleep 5
 		hey \$A get Stats of Window 0 | grep result
 		hey \$A set Rate of Window 0 to 8 >/dev/null; sleep 3
 		hey \$A get Position of Window 0 | grep result

@@ -95,7 +95,8 @@ private:
 
 static property_info sProperties[] = {
 	{"Position", {B_GET_PROPERTY, B_SET_PROPERTY, 0},
-		{B_DIRECT_SPECIFIER, 0}, "Playback position in microseconds.", 0,
+		{B_DIRECT_SPECIFIER, 0}, "Playback position in microseconds; set it "
+		"with a number of microseconds or a time such as \"1:10:00\".", 0,
 		{B_INT64_TYPE}},
 	{"Duration", {B_GET_PROPERTY, 0}, {B_DIRECT_SPECIFIER, 0},
 		"Length of the movie in microseconds.", 0, {B_INT64_TYPE}},
@@ -1939,10 +1940,21 @@ PlayerWindow::_HandleScripting(BMessage* message)
 		if (get)
 			reply.AddInt64("result", fPlayer->Position());
 		else {
+			// Microseconds, or a time as the Go to Time panel takes it
+			// ("1:10:00"): hey sends numbers as 32 bits, which ends at
+			// 35 minutes in microseconds.
 			double time;
-			status = find_number(message, &time);
-			if (status == B_OK)
-				fPlayer->Seek((bigtime_t)time, true);
+			BString text;
+			bigtime_t parsed;
+			if (message->FindString("data", &text) == B_OK) {
+				status = parse_time(text.String(), &parsed) ? B_OK : B_BAD_VALUE;
+				if (status == B_OK)
+					fPlayer->Seek(parsed, true);
+			} else {
+				status = find_number(message, &time);
+				if (status == B_OK)
+					fPlayer->Seek((bigtime_t)time, true);
+			}
 		}
 	} else if (name == "Duration") {
 		reply.AddInt64("result", fPlayer->Duration());
