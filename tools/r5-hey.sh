@@ -20,7 +20,10 @@ APP=${AIRTIME_APP:-/boot/system/apps/airTime}
 			run\ *)
 				echo "hey \$A quit >/dev/null 2>&1 || true"
 				echo "sleep 1"
-				echo "for t in \$(ps | grep -v -e grep -e bash | awk '/apps\\/airTime/ { for (i = 2; i <= NF; i++) if (\$i ~ /^[0-9]+\$/) { print \$i; break } }'); do kill -9 \$t || true; done"
+				# Whichever copy is being restarted, and the installed one:
+				# they share a signature, and a single-launch app hands its
+				# files to the copy already running.
+				echo "for t in \$(ps | grep -v -e grep -e bash | awk '/apps\\/airTime|airTime\\.dev/ { for (i = 2; i <= NF; i++) if (\$i ~ /^[0-9]+\$/) { print \$i; break } }'); do kill -9 \$t || true; done"
 				echo "(AIRTIME_TRACE=1 $APP ${command#run } > airtime.log 2>&1 &)"
 				echo "sleep 3"
 				;;

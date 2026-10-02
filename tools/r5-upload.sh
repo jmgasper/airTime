@@ -21,7 +21,12 @@ for part in "$WORKDIR"/part.*; do
 done
 {
 	echo "cd /boot/home/rock5-lab"
-	echo "cat ${PARTS[*]} > $NAME"
+	# A new file renamed into place: a program running from the old one keeps
+	# it, where writing over it changes the code it is running (and crashes
+	# it, as an airTime.dev still playing once did).
+	echo "cat ${PARTS[*]} > .$NAME.new"
+	echo "chmod --reference=$NAME .$NAME.new 2>/dev/null || true"
+	echo "mv -f .$NAME.new $NAME"
 	echo "rm ${PARTS[*]}"
 	echo "test \"\$(sha256sum $NAME | cut -d' ' -f1)\" = $SUM && echo uploaded $NAME"
 } > "$WORKDIR/join.cmd"

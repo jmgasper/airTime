@@ -5,17 +5,26 @@
 
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <Mime.h>
 #include <Roster.h>
 
 #include "App.h"
+#include "CrashTrace.h"
 
 
 int
 main(int argc, char** argv)
 {
+	airtime::install_crash_trace();
+	if (getenv("AIRTIME_CRASH_TEST") != NULL) {
+		// To see the crash trace work on a machine.
+		int* volatile nowhere = NULL;
+		*nowhere = 0;
+	}
+
 	// `airTime --register-default` sets the preferred application of the
 	// film and music types without starting the player (the package's post
 	// install script uses it).
