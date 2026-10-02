@@ -16,4 +16,4 @@ tar -C "$ROOT" --exclude=.git --exclude='build-*' --exclude=artifacts \
 	| "${SSH[@]}" "mkdir -p $REMOTE && tar -C $REMOTE -xmf -"
 "${SSH[@]}" "cd $REMOTE && make -j16 \
 	FFMPEG_CFLAGS=-I$DEPS/ffmpeg6_devel/develop/headers \
-	FFMPEG_LDFLAGS=-L$DEPS/lib $*"
+	FFMPEG_LDFLAGS=-L$DEPS/lib MIMESET=true $*"

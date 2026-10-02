@@ -7,6 +7,9 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <Mime.h>
+#include <Roster.h>
+
 #include "App.h"
 
 
@@ -19,6 +22,13 @@ main(int argc, char** argv)
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--register-default") == 0) {
 			BApplication application("application/x-vnd.airOS-airTime-setup");
+			// This copy is the one to start for the types: a development
+			// build run earlier may have left its own path as the hint.
+			app_info info;
+			if (application.GetAppInfo(&info) == B_OK) {
+				BMimeType type("application/x-vnd.airOS-airTime");
+				type.SetAppHint(&info.ref);
+			}
 			int32 changed = airtime::App::RegisterAsDefaultPlayer(
 				i + 1 < argc && strcmp(argv[i + 1], "--force") == 0);
 			printf("airTime is the preferred player for %d more types\n",
