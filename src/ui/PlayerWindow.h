@@ -119,6 +119,7 @@ private:
 			BRect				fSavedFrame;
 			bool				fHudShown;
 			bigtime_t			fLastActivity;
+			bigtime_t			fScreenSaverKicked;
 			bool				fAlwaysOnTop;
 
 			int32				fIgnoreResize;

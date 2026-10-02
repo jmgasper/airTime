@@ -24,6 +24,7 @@
 #include <PropertyInfo.h>
 #include <Roster.h>
 #include <Screen.h>
+#include <WindowScreen.h>
 
 #include "AppInfo.h"
 #include "ControlBar.h"
@@ -53,6 +54,7 @@ static const float kAudioInfoHeight = 70;
 static const float kEmptyVideoWidth = 520;
 static const float kEmptyVideoHeight = 292;
 static const bigtime_t kPulseInterval = 100000;
+static const bigtime_t kScreenSaverInterval = 20000000;
 static const bigtime_t kHudTimeout = 2800000;
 
 static const double kSpeeds[] = {0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 3.0};
@@ -156,6 +158,7 @@ PlayerWindow::PlayerWindow(BRect frame)
 	fFullScreen(false),
 	fHudShown(false),
 	fLastActivity(0),
+	fScreenSaverKicked(0),
 	fAlwaysOnTop(false),
 	fIgnoreResize(0),
 	fResizePending(false),
@@ -1028,6 +1031,22 @@ PlayerWindow::_Pulse()
 		_UpdateControls();
 
 	bigtime_t now = system_time();
+
+	// No screen saver while a film plays where it can be seen: putting the
+	// pointer where it already is counts as using the computer, as Haiku's
+	// MediaPlayer does it.
+	if (fHasFile && fPlayer->IsPlaying() && fPlayer->HasMovingVideo()
+		&& !IsHidden() && !IsMinimized()
+		&& now - fScreenSaverKicked > kScreenSaverInterval) {
+		fScreenSaverKicked = now;
+		BPoint where;
+		uint32 buttons;
+		fVideo->GetMouse(&where, &buttons, false);
+		if (buttons == 0) {
+			fVideo->ConvertToScreen(&where);
+			set_mouse_position((int32)where.x, (int32)where.y);
+		}
+	}
 
 	// Fast forward and rewind held down speed up the longer they are held.
 	if (fScanHeld) {
