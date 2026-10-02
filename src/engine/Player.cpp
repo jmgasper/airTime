@@ -1615,6 +1615,14 @@ Player::_FallBackToSoftware(const char* why)
 int
 Player::_HurryLevel()
 {
+	// AIRTIME_HURRY_CYCLE=1: every level in turn, two seconds each, to
+	// try the decoders with all of them.
+	static bool sCycle = getenv("AIRTIME_HURRY_CYCLE") != NULL;
+	if (sCycle) {
+		fHurry = (int)((system_time() / 2000000) % 5);
+		return fHurry;
+	}
+
 	bool active;
 	{
 		std::lock_guard<std::mutex> lock(fLock);
