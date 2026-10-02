@@ -48,7 +48,8 @@ VideoView::VideoView(BRect frame, const BMessenger& target)
 	fDrawingSource(-1),
 	fDrawingClone(-1),
 	fDrawingBits(NULL),
-	fDrawingBytesPerRow(0)
+	fDrawingBytesPerRow(0),
+	fDirectDaemon(-1)
 {
 	fBitmaps[0] = NULL;
 	fBitmaps[1] = NULL;
@@ -316,6 +317,7 @@ void
 VideoView::DirectConnected(direct_buffer_info* info)
 {
 	std::lock_guard<std::mutex> lock(fDirectLock);
+	fDirectDaemon = find_thread(NULL);
 	switch (info->buffer_state & B_DIRECT_MODE_MASK) {
 		case B_DIRECT_START:
 		case B_DIRECT_MODIFY:
@@ -392,9 +394,30 @@ VideoView::_DirectScale()
 	if (!fDirectAllowed)
 		return 1.0f;
 	std::lock_guard<std::mutex> lock(fDirectLock);
-	if (!fDirectConnected || fCovered || fDirectBits == NULL)
+	if (!_DirectStillConnected() || fCovered || fDirectBits == NULL)
 		return 1.0f;
 	return fDirectScale;
+}
+
+
+/*!	Called with fDirectLock held. When the app_server gives up on a window
+	that took too long to answer it, it ends the window's daemon thread and
+	sends no stop: the clipping known here is then out of date for good. */
+bool
+VideoView::_DirectStillConnected()
+{
+	if (!fDirectConnected)
+		return false;
+	thread_info info;
+	if (fDirectDaemon >= 0 && get_thread_info(fDirectDaemon, &info) != B_OK) {
+		fDirectConnected = false;
+		fDirectBits = NULL;
+		fDirectClips.clear();
+		fprintf(stderr, "airTime: frame buffer access ended without a stop; "
+			"drawing through the app_server\n");
+		return false;
+	}
+	return true;
 }
 
 
@@ -437,7 +460,7 @@ VideoView::_DrawDirect(BBitmap* bitmap, BRect rect)
 		return false;
 	}
 	std::lock_guard<std::mutex> lock(fDirectLock);
-	if (!fDirectConnected || fCovered || fDirectBits == NULL) {
+	if (!_DirectStillConnected() || fCovered || fDirectBits == NULL) {
 		fDirectUsed = false;
 		return false;
 	}

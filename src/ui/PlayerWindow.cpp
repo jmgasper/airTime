@@ -28,6 +28,7 @@
 
 #include "AppInfo.h"
 #include "ControlBar.h"
+#include "DirectRescue.h"
 #include "GoToTimeWindow.h"
 #include "InspectorWindow.h"
 #include "Languages.h"
@@ -173,6 +174,8 @@ PlayerWindow::PlayerWindow(BRect frame)
 	fHudShown(false),
 	fLastActivity(0),
 	fScreenSaverKicked(0),
+	fCreated(system_time()),
+	fDaemonKilled(false),
 	fAlwaysOnTop(false),
 	fIgnoreResize(0),
 	fResizePending(false),
@@ -244,6 +247,9 @@ PlayerWindow::~PlayerWindow()
 	// No more DirectConnected() calls into a window half taken down.
 	Hide();
 	Sync();
+	// If the app_server gave up on this window's frame buffer access, the
+	// stop never came, and BDirectWindow's destructor would wait for it.
+	release_dead_direct_connection(this);
 	delete fSubtitlePanel;
 	if (fInspector.IsValid())
 		fInspector.SendMessage(B_QUIT_REQUESTED);
@@ -1060,6 +1066,16 @@ PlayerWindow::_Pulse()
 		_UpdateControls();
 
 	bigtime_t now = system_time();
+
+	// AIRTIME_KILL_DIRECT_DAEMON=<seconds>: end the frame buffer access the
+	// way the app_server's timeout does, to try what follows.
+	static const char* sKillDaemon = getenv("AIRTIME_KILL_DIRECT_DAEMON");
+	if (sKillDaemon != NULL && !fDaemonKilled
+		&& now - fCreated > (bigtime_t)(atof(sKillDaemon) * 1000000)) {
+		fDaemonKilled = true;
+		fprintf(stderr, "airTime: ending the direct daemon for a test\n");
+		kill_direct_daemon(this);
+	}
 
 	// No screen saver while a film plays where it can be seen: putting the
 	// pointer where it already is counts as using the computer, as Haiku's

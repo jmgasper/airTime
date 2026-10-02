@@ -73,6 +73,7 @@ public:
 private:
 			bool				_DrawDirect(BBitmap* bitmap, BRect rect);
 			float				_DirectScale();
+			bool				_DirectStillConnected();
 			static void			_DeviceRect(BRect rect, BPoint origin,
 									float scale, int* left, int* top,
 									int* width, int* height);
@@ -130,6 +131,10 @@ private:
 			area_id				fDrawingClone;
 			uint8*				fDrawingBits;
 			int32				fDrawingBytesPerRow;
+			// The thread that calls DirectConnected(): BDirectWindow's
+			// daemon. If it is gone, the app_server has ended the access
+			// without a stop.
+			thread_id			fDirectDaemon;
 };
 
 }	// namespace airtime

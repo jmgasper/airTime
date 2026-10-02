@@ -121,6 +121,8 @@ private:
 			bool				fHudShown;
 			bigtime_t			fLastActivity;
 			bigtime_t			fScreenSaverKicked;
+			bigtime_t			fCreated;
+			bool				fDaemonKilled;
 			bool				fAlwaysOnTop;
 
 			int32				fIgnoreResize;
