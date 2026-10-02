@@ -1,0 +1,447 @@
+/*
+ * Copyright 2026, air/OS contributors.
+ * Distributed under the terms of the MIT License.
+ *
+ * Tests of the engine parts that do not need Haiku. Built on Linux against
+ * the host's FFmpeg with stand-ins for a few Haiku headers (tests/host):
+ *
+ *	make check-host
+ *
+ * Subtitle file tests use files from AIRTIME_TEST_MEDIA if it is set.
+ */
+
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <string>
+#include <vector>
+
+#include "Bitstream.h"
+#include "Languages.h"
+#include "Subtitles.h"
+#include "Tracks.h"
+
+
+using namespace airtime;
+
+static int sFailures = 0;
+static int sChecks = 0;
+
+#define CHECK(condition) \
+	do { \
+		sChecks++; \
+		if (!(condition)) { \
+			sFailures++; \
+			fprintf(stderr, "%s:%d: CHECK failed: %s\n", __FILE__, __LINE__, \
+				#condition); \
+		} \
+	} while (0)
+
+#define CHECK_EQUAL_STRING(actual, expected) \
+	do { \
+		sChecks++; \
+		std::string a = (actual), e = (expected); \
+		if (a != e) { \
+			sFailures++; \
+			fprintf(stderr, "%s:%d: expected \"%s\", got \"%s\"\n", __FILE__, \
+				__LINE__, e.c_str(), a.c_str()); \
+		} \
+	} while (0)
+
+
+static void
+test_time()
+{
+	CHECK_EQUAL_STRING(format_time(0).String(), "0:00");
+	CHECK_EQUAL_STRING(format_time(83000000).String(), "1:23");
+	CHECK_EQUAL_STRING(format_time(3723000000LL).String(), "1:02:03");
+	CHECK_EQUAL_STRING(format_time(3723456789LL, true).String(), "1:02:03.45");
+	CHECK_EQUAL_STRING(format_time(5000000, false, true).String(), "0:00:05");
+	CHECK_EQUAL_STRING(format_time(-65000000).String(), "-1:05");
+
+	bigtime_t time = 0;
+	CHECK(parse_time("1:02:03", &time) && time == 3723000000LL);
+	CHECK(parse_time("62:03.5", &time) && time == 3723500000LL);
+	CHECK(parse_time("90", &time) && time == 90000000);
+	CHECK(parse_time(" 1h2m3s ", &time) && time == 3723000000LL);
+	CHECK(parse_time("2m", &time) && time == 120000000);
+	CHECK(parse_time("0:00:10.25", &time) && time == 10250000);
+	CHECK(!parse_time("", &time));
+	CHECK(!parse_time("abc", &time));
+	CHECK(!parse_time("1:75", &time));
+	CHECK(!parse_time("1:2:3:4", &time));
+	CHECK(!parse_time("-5", &time));
+}
+
+
+static void
+test_languages()
+{
+	CHECK_EQUAL_STRING(language_name("eng").String(), "English");
+	CHECK_EQUAL_STRING(language_name("fre").String(), "French");
+	CHECK_EQUAL_STRING(language_name("fra").String(), "French");
+	CHECK_EQUAL_STRING(language_name("de").String(), "German");
+	CHECK_EQUAL_STRING(language_name("pt-BR").String(), "Portuguese");
+	CHECK_EQUAL_STRING(language_name("und").String(), "");
+	CHECK_EQUAL_STRING(language_name("xyz").String(), "XYZ");
+	CHECK(same_language("fre", "fr"));
+	CHECK(same_language("ger", "deu"));
+	CHECK(!same_language("eng", "fre"));
+	CHECK(!same_language("", "eng"));
+	CHECK_EQUAL_STRING(canonical_language("chi").String(), "zh");
+
+	TrackInfo audio;
+	audio.kind = TRACK_AUDIO;
+	audio.language = "fre";
+	audio.title = "Version française";
+	audio.codec = "Dolby Digital";
+	audio.channels = 6;
+	CHECK_EQUAL_STRING(audio.Label(2).String(),
+		"French — Version française (Dolby Digital 5.1)");
+	TrackInfo subtitle;
+	subtitle.kind = TRACK_SUBTITLE;
+	subtitle.language = "eng";
+	subtitle.codec = "SubRip";
+	subtitle.isForced = true;
+	CHECK_EQUAL_STRING(subtitle.Label(1).String(),
+		"English (SubRip) [Forced]");
+	TrackInfo untitled;
+	untitled.kind = TRACK_AUDIO;
+	CHECK_EQUAL_STRING(untitled.Label(3).String(), "Track 3");
+}
+
+
+static void
+test_ass()
+{
+	SubtitleEvent event;
+	parse_ass_dialogue("0,0,Default,,0,0,0,,Hello {\\i1}world{\\i0}\\Nsecond",
+		event);
+	CHECK(event.lines.size() == 2);
+	CHECK(event.alignment == 2);
+	if (event.lines.size() == 2) {
+		CHECK(event.lines[0].runs.size() == 2);
+		CHECK_EQUAL_STRING(event.lines[0].PlainText().String(), "Hello world");
+		if (event.lines[0].runs.size() == 2) {
+			CHECK(!event.lines[0].runs[0].italic);
+			CHECK(event.lines[0].runs[1].italic);
+		}
+		CHECK_EQUAL_STRING(event.lines[1].PlainText().String(), "second");
+	}
+
+	SubtitleEvent top;
+	parse_ass_dialogue("1,0,Default,,0,0,0,,{\\an8}{\\c&H00FFFF&}Top", top);
+	CHECK(top.alignment == 8);
+	CHECK(top.lines.size() == 1);
+	if (!top.lines.empty() && !top.lines[0].runs.empty()) {
+		const SubtitleRun& run = top.lines[0].runs[0];
+		CHECK(run.hasColor);
+		CHECK(run.color.red == 255 && run.color.green == 255
+			&& run.color.blue == 0);
+	}
+
+	SubtitleEvent legacy;
+	parse_ass_dialogue("0,0,Default,,0,0,0,,{\\a6}Old top", legacy);
+	CHECK(legacy.alignment == 8);
+
+	SubtitleEvent drawing;
+	parse_ass_dialogue(
+		"0,0,Default,,0,0,0,,{\\p1}m 0 0 l 100 0 100 100{\\p0}Text", drawing);
+	CHECK_EQUAL_STRING(subtitle_plain_text(drawing).String(), "Text");
+
+	SubtitleEvent bold;
+	parse_ass_dialogue("0,0,Default,,0,0,0,,{\\b1}Bold{\\b0} plain\\hspace",
+		bold);
+	CHECK(bold.lines.size() == 1);
+	if (bold.lines.size() == 1) {
+		CHECK(bold.lines[0].runs[0].bold);
+		CHECK_EQUAL_STRING(bold.lines[0].PlainText().String(),
+			"Bold plain space");
+	}
+
+	SubtitleEvent whole;
+	parse_ass_dialogue(
+		"Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,Full line", whole);
+	CHECK_EQUAL_STRING(subtitle_plain_text(whole).String(), "Full line");
+}
+
+
+static SubtitleEventPtr
+make_event(bigtime_t start, bigtime_t end, const char* text)
+{
+	auto event = std::make_shared<SubtitleEvent>();
+	event->start = start;
+	event->end = end;
+	if (text != NULL) {
+		SubtitleLine line;
+		SubtitleRun run;
+		run.text = text;
+		line.runs.push_back(run);
+		event->lines.push_back(line);
+	}
+	return event;
+}
+
+
+static void
+test_track()
+{
+	SubtitleTrack track;
+	track.SetMaxOpenDuration(5000000);
+	track.Add(make_event(1000000, 3000000, "one"));
+	track.Add(make_event(1000000, 3000000, "one"));	// a duplicate
+	track.Add(make_event(2000000, 4000000, "two"));
+	track.Add(make_event(10000000, kNoTime, "open"));
+	track.Add(make_event(12000000, kNoTime, NULL));	// clears the screen
+	track.Add(make_event(20000000, kNoTime, "last"));
+	CHECK(track.Count() == 5);
+
+	CHECK(track.Active(500000).empty());
+	CHECK(track.Active(1500000).size() == 1);
+	std::vector<SubtitleEventPtr> both = track.Active(2500000);
+	CHECK(both.size() == 2);
+	if (both.size() == 2) {
+		CHECK_EQUAL_STRING(subtitle_plain_text(*both[0]).String(), "one");
+		CHECK_EQUAL_STRING(subtitle_plain_text(*both[1]).String(), "two");
+	}
+	CHECK(track.Active(11000000).size() == 1);
+	CHECK(track.Active(13000000).empty());
+	CHECK(track.Active(24000000).size() == 1);
+	CHECK(track.Active(26000000).empty());	// open events time out
+
+	track.Prune(9000000);
+	CHECK(track.Count() == 3);
+}
+
+
+static void
+test_files(const char* media)
+{
+	if (media == NULL) {
+		printf("  (no AIRTIME_TEST_MEDIA: subtitle files skipped)\n");
+		return;
+	}
+	std::string base(media);
+
+	SubtitleTrack english;
+	BString codec, language, reason;
+	CHECK(load_subtitle_file((base + "/en.srt").c_str(), &english, &codec,
+		&language, &reason) == B_OK);
+	CHECK_EQUAL_STRING(codec.String(), "SubRip");
+	CHECK(english.Count() == 22);
+	std::vector<SubtitleEventPtr> at10 = english.Active(10500000);
+	CHECK(at10.size() == 1);
+	if (at10.size() == 1) {
+		CHECK_EQUAL_STRING(subtitle_plain_text(*at10[0]).String(),
+			"English line 3 at 10 s\nsecond row");
+	}
+	std::vector<SubtitleEventPtr> italic = english.Active(6500000);
+	CHECK(italic.size() == 1 && !italic[0]->lines.empty()
+		&& italic[0]->lines[0].runs[0].italic);
+
+	SubtitleTrack german;
+	CHECK(load_subtitle_file((base + "/sidecar.de.srt").c_str(), &german,
+		&codec, &language, &reason) == B_OK);
+	CHECK_EQUAL_STRING(language.String(), "de");
+	std::vector<SubtitleEventPtr> line = german.Active(1500000);
+	CHECK(line.size() == 1);
+	if (line.size() == 1) {
+		CHECK_EQUAL_STRING(subtitle_plain_text(*line[0]).String(),
+			"Deutsche Zeile 1 – Größe übergroß");
+	}
+
+	SubtitleTrack french;
+	CHECK(load_subtitle_file((base + "/fr.ass").c_str(), &french, &codec,
+		&language, &reason) == B_OK);
+	std::vector<SubtitleEventPtr> top = french.Active(9000000);
+	CHECK(top.size() == 1 && top[0]->alignment == 8);
+
+	SubtitleTrack missing;
+	CHECK(load_subtitle_file((base + "/does-not-exist.srt").c_str(), &missing,
+		&codec, &language, &reason) != B_OK);
+}
+
+
+// #pragma mark - captions
+
+
+static uint8
+odd_parity(uint8 value)
+{
+	value &= 0x7f;
+	int bits = 0;
+	for (int i = 0; i < 7; i++)
+		bits += (value >> i) & 1;
+	return bits % 2 == 0 ? value | 0x80 : value;
+}
+
+
+// CEA-608 byte pairs for a pop-on caption on row 15.
+static std::vector<std::pair<uint8, uint8> >
+pop_on_caption(const char* text)
+{
+	std::vector<std::pair<uint8, uint8> > pairs;
+	auto control = [&](uint8 a, uint8 b) {
+		pairs.push_back(std::make_pair(odd_parity(a), odd_parity(b)));
+		pairs.push_back(std::make_pair(odd_parity(a), odd_parity(b)));
+	};
+	control(0x14, 0x20);	// resume caption loading
+	control(0x14, 0x2e);	// erase non-displayed memory
+	control(0x14, 0x70);	// row 15, column 0
+	size_t length = strlen(text);
+	for (size_t i = 0; i < length; i += 2) {
+		uint8 second = i + 1 < length ? text[i + 1] : 0;
+		pairs.push_back(std::make_pair(odd_parity(text[i]),
+			second != 0 ? odd_parity(second) : 0x80));
+	}
+	control(0x14, 0x2f);	// end of caption: show it
+	return pairs;
+}
+
+
+static std::vector<uint8>
+sei_nal(const std::vector<uint8>& triplets)
+{
+	std::vector<uint8> payload = {0xb5, 0x00, 0x31, 'G', 'A', '9', '4', 0x03};
+	payload.push_back(0x40 | (uint8)(triplets.size() / 3));
+	payload.push_back(0xff);
+	payload.insert(payload.end(), triplets.begin(), triplets.end());
+	payload.push_back(0xff);
+
+	std::vector<uint8> rbsp = {0x04, (uint8)payload.size()};
+	rbsp.insert(rbsp.end(), payload.begin(), payload.end());
+	rbsp.push_back(0x80);
+
+	// Emulation prevention.
+	std::vector<uint8> nal = {0x06};
+	int zeros = 0;
+	for (uint8 byte : rbsp) {
+		if (zeros >= 2 && byte <= 3) {
+			nal.push_back(0x03);
+			zeros = 0;
+		}
+		nal.push_back(byte);
+		zeros = byte == 0 ? zeros + 1 : 0;
+	}
+	return nal;
+}
+
+
+static void
+test_captions()
+{
+	std::vector<uint8> triplets = {0xfc, 0x94, 0x20, 0xfc, 0x00, 0x00};
+	std::vector<uint8> nal = sei_nal(triplets);
+
+	// Length prefixed, as in MP4 and Matroska.
+	std::vector<uint8> packet = {0, 0, 0, (uint8)nal.size()};
+	packet.insert(packet.end(), nal.begin(), nal.end());
+	std::vector<uint8> slice = {0x65, 0x88, 0x80, 0x00};
+	packet.insert(packet.end(), {0, 0, 0, (uint8)slice.size()});
+	packet.insert(packet.end(), slice.begin(), slice.end());
+
+	std::vector<uint8> found;
+	CHECK(extract_a53_captions(CAPTIONS_H264, packet.data(), packet.size(), 4,
+		found));
+	CHECK(found == triplets);
+
+	// Annex B.
+	std::vector<uint8> annexB = {0, 0, 0, 1};
+	annexB.insert(annexB.end(), nal.begin(), nal.end());
+	annexB.insert(annexB.end(), {0, 0, 1});
+	annexB.insert(annexB.end(), slice.begin(), slice.end());
+	found.clear();
+	CHECK(extract_a53_captions(CAPTIONS_H264, annexB.data(), annexB.size(), 0,
+		found));
+	CHECK(found == triplets);
+
+	// No captions in a plain slice.
+	found.clear();
+	CHECK(!extract_a53_captions(CAPTIONS_H264, slice.data(), slice.size(), 0,
+		found));
+
+	// The 608 decoder turns a pop-on caption into an event.
+	SubtitleTrack track;
+	CaptionDecoder decoder(&track);
+	CHECK(decoder.Init() == B_OK);
+	std::vector<std::pair<uint8, uint8> > pairs = pop_on_caption("HELLO CC");
+	bigtime_t pts = 0;
+	for (auto& pair : pairs) {
+		uint8 data[3] = {0xfc, pair.first, pair.second};
+		decoder.Add(pts, data, 3);
+		pts += 33367;
+	}
+	for (int i = 0; i < 60; i++) {
+		uint8 padding[3] = {0xfc, 0x80, 0x80};
+		decoder.Add(pts, padding, 3);
+		pts += 33367;
+	}
+	decoder.EndOfStream();
+	std::vector<SubtitleEventPtr> shown = track.Active(pts - 1000000);
+	CHECK(!shown.empty());
+	if (!shown.empty()) {
+		CHECK(shown[0]->caption);
+		CHECK(shown[0]->positionY > 200);
+		CHECK_EQUAL_STRING(subtitle_plain_text(*shown[0]).String(), "HELLO CC");
+	}
+
+	// Erasing the screen ends the caption.
+	uint8 erase[2] = {odd_parity(0x14), odd_parity(0x2c)};
+	for (int i = 0; i < 2; i++) {
+		uint8 data[3] = {0xfc, erase[0], erase[1]};
+		decoder.Add(pts, data, 3);
+		pts += 33367;
+	}
+	for (int i = 0; i < 20; i++) {
+		uint8 padding[3] = {0xfc, 0x80, 0x80};
+		decoder.Add(pts, padding, 3);
+		pts += 33367;
+	}
+	decoder.EndOfStream();
+	CHECK(track.Active(pts - 100000).empty());
+}
+
+
+static void
+test_sps()
+{
+	// x264, 1920x1080 (1088 coded), High profile, 4 reference frames.
+	const uint8 sps[] = {0x67, 0x64, 0x00, 0x28, 0xac, 0xd9, 0x40, 0x78, 0x02,
+		0x27, 0xe5, 0x84, 0x00, 0x00, 0x03, 0x00, 0x04, 0x00, 0x00, 0x03,
+		0x00, 0xf0, 0x3c, 0x60, 0xc6, 0x58};
+	H264SequenceInfo info;
+	CHECK(parse_h264_sps(sps, sizeof(sps), &info));
+	CHECK(info.profile == 100);
+	CHECK(info.chromaFormat == 1);
+	CHECK(info.bitDepthLuma == 8);
+	CHECK(info.frameMbsOnly);
+	CHECK(info.width == 1920);
+	CHECK(info.height == 1088);
+	CHECK(info.maxReferenceFrames == 4);
+
+	std::vector<uint8> avcC = {1, 0x64, 0x00, 0x28, 0xff, 0xe1, 0,
+		(uint8)sizeof(sps)};
+	avcC.insert(avcC.end(), sps, sps + sizeof(sps));
+	avcC.insert(avcC.end(), {1, 0, 4, 0x68, 0xeb, 0xe3, 0xcb});
+	CHECK(nal_length_size(false, avcC.data(), avcC.size()) == 4);
+	H264SequenceInfo fromRecord;
+	CHECK(find_h264_sps(avcC.data(), avcC.size(), 0, &fromRecord));
+	CHECK(fromRecord.width == 1920);
+}
+
+
+int
+main()
+{
+	printf("airTime engine tests\n");
+	test_time();
+	test_languages();
+	test_ass();
+	test_track();
+	test_files(getenv("AIRTIME_TEST_MEDIA"));
+	test_captions();
+	test_sps();
+	printf("%d checks, %d failed\n", sChecks, sFailures);
+	return sFailures == 0 ? 0 : 1;
+}

@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <defs>
+    <radialGradient id="s0" gradientUnits="userSpaceOnUse" cx="0" cy="0" r="64" gradientTransform="matrix(0.3750 0.0000 0.0000 0.0600 32.0000 58.0000)">
+      <stop offset="0.000" stop-color="#0a1428" stop-opacity="0.431"/>
+      <stop offset="0.600" stop-color="#0a1428" stop-opacity="0.157"/>
+      <stop offset="1.000" stop-color="#0a1428" stop-opacity="0.000"/>
+    </radialGradient>
+    <linearGradient id="s1" gradientUnits="userSpaceOnUse" x1="-64" y1="0" x2="64" y2="0" gradientTransform="matrix(0.0000 0.4375 -0.4375 0.0000 32.0000 32.0000)">
+      <stop offset="0.000" stop-color="#fbfbfd" stop-opacity="1.000"/>
+      <stop offset="0.450" stop-color="#c9ccd2" stop-opacity="1.000"/>
+      <stop offset="0.550" stop-color="#aeb2b9" stop-opacity="1.000"/>
+      <stop offset="1.000" stop-color="#e6e8ec" stop-opacity="1.000"/>
+    </linearGradient>
+    <radialGradient id="s3" gradientUnits="userSpaceOnUse" cx="0" cy="0" r="64" gradientTransform="matrix(0.6250 0.0000 0.0000 0.6250 28.0000 22.0000)">
+      <stop offset="0.000" stop-color="#8fd0ff" stop-opacity="1.000"/>
+      <stop offset="0.450" stop-color="#3a8ff0" stop-opacity="1.000"/>
+      <stop offset="1.000" stop-color="#0f3f9e" stop-opacity="1.000"/>
+    </radialGradient>
+    <linearGradient id="s5" gradientUnits="userSpaceOnUse" x1="-64" y1="0" x2="64" y2="0" gradientTransform="matrix(0.0000 0.1562 -0.1562 0.0000 32.0000 23.0000)">
+      <stop offset="0.000" stop-color="#ffffff" stop-opacity="0.745"/>
+      <stop offset="1.000" stop-color="#ffffff" stop-opacity="0.000"/>
+    </linearGradient>
+    <linearGradient id="s7" gradientUnits="userSpaceOnUse" x1="-64" y1="0" x2="64" y2="0" gradientTransform="matrix(0.0000 0.1719 -0.1719 0.0000 26.0000 33.0000)">
+      <stop offset="0.000" stop-color="#ffffff" stop-opacity="1.000"/>
+      <stop offset="1.000" stop-color="#dfe9f6" stop-opacity="1.000"/>
+    </linearGradient>
+  </defs>
+  <path d="M 32.000 57.000 C 32.552 57.000 33.000 57.448 33.000 58.000 C 33.000 58.552 32.552 59.000 32.000 59.000 C 31.448 59.000 31.000 58.552 31.000 58.000 C 31.000 57.448 31.448 57.000 32.000 57.000 Z" fill="url(#s0)" transform="matrix(24.0000 0.0000 0.0000 4.0000 -736.0000 -174.0000)"/>
+  <path d="M 32.000 5.000 C 46.912 5.000 59.000 17.088 59.000 32.000 C 59.000 46.912 46.912 59.000 32.000 59.000 C 17.088 59.000 5.000 46.912 5.000 32.000 C 5.000 17.088 17.088 5.000 32.000 5.000 Z" fill="#4d535c" stroke="#4d535c" stroke-width="1.50" stroke-linejoin="round"/>
+  <path d="M 32.000 5.000 C 46.912 5.000 59.000 17.088 59.000 32.000 C 59.000 46.912 46.912 59.000 32.000 59.000 C 17.088 59.000 5.000 46.912 5.000 32.000 C 5.000 17.088 17.088 5.000 32.000 5.000 Z" fill="url(#s1)"/>
+  <path d="M 32.000 9.200 L 32.000 6.200 M 54.800 32.000 L 57.800 32.000 M 32.000 54.800 L 32.000 57.800 M 9.200 32.000 L 6.200 32.000" fill="none" stroke="#3a4048" stroke-width="2.00" stroke-linejoin="miter" stroke-linecap="butt"/>
+  <path d="M 43.400 12.255 L 44.300 10.696 M 51.745 20.600 L 53.304 19.700 M 51.745 43.400 L 53.304 44.300 M 43.400 51.745 L 44.300 53.304 M 20.600 51.745 L 19.700 53.304 M 12.255 43.400 L 10.696 44.300 M 12.255 20.600 L 10.696 19.700 M 20.600 12.255 L 19.700 10.696" fill="none" stroke="#3a4048" stroke-width="1.00" stroke-linejoin="miter" stroke-linecap="butt"/>
+  <path d="M 32.000 11.000 C 43.598 11.000 53.000 20.402 53.000 32.000 C 53.000 43.598 43.598 53.000 32.000 53.000 C 20.402 53.000 11.000 43.598 11.000 32.000 C 11.000 20.402 20.402 11.000 32.000 11.000 Z" fill="#0b2c6e" stroke="#0b2c6e" stroke-width="1.00" stroke-linejoin="round"/>
+  <path d="M 32.000 11.000 C 43.598 11.000 53.000 20.402 53.000 32.000 C 53.000 43.598 43.598 53.000 32.000 53.000 C 20.402 53.000 11.000 43.598 11.000 32.000 C 11.000 20.402 20.402 11.000 32.000 11.000 Z" fill="url(#s3)"/>
+  <path d="M 32.000 12.500 C 40.285 12.500 47.000 16.753 47.000 22.000 C 47.000 27.247 40.285 31.500 32.000 31.500 C 23.715 31.500 17.000 27.247 17.000 22.000 C 17.000 16.753 23.715 12.500 32.000 12.500 Z" fill="url(#s5)"/>
+  <path d="M 27.000 23.500 L 27.000 44.500 L 45.000 34.000 L 27.000 23.500 Z" fill="#00143c" opacity="0.353"/>
+  <path d="M 26.000 21.500 L 26.000 42.500 L 44.000 32.000 L 26.000 21.500 Z" fill="url(#s7)"/>
+</svg>

@@ -1,0 +1,8 @@
+build-haiku/
+build-host/
+build-arm64/
+build-x86_64/
+artifacts/
+*.o
+*.d
+__pycache__/

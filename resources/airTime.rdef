@@ -1,0 +1,50 @@
+resource app_signature "application/x-vnd.airOS-airTime";
+
+resource app_flags B_SINGLE_LAUNCH;
+
+resource app_version {
+	major = 1,
+	middle = 0,
+	minor = 0,
+	variety = B_APPV_FINAL,
+	internal = 0,
+	short_info = "airTime 1.0",
+	long_info = "airTime 1.0 — the movie player of air/OS. ©2026 air/OS contributors"
+};
+
+resource vector_icon {
+	import "branding/airtime-icon.hvif"
+};
+
+resource file_types message {
+	"types" = "video",
+	"types" = "audio",
+	"types" = "video/mp4",
+	"types" = "video/quicktime",
+	"types" = "video/x-matroska",
+	"types" = "video/webm",
+	"types" = "video/x-msvideo",
+	"types" = "video/mpeg",
+	"types" = "video/mp2t",
+	"types" = "video/x-m4v",
+	"types" = "video/3gpp",
+	"types" = "video/x-flv",
+	"types" = "video/ogg",
+	"types" = "video/x-ms-wmv",
+	"types" = "video/x-ms-asf",
+	"types" = "audio/mpeg",
+	"types" = "audio/mp4",
+	"types" = "audio/x-m4a",
+	"types" = "audio/aac",
+	"types" = "audio/flac",
+	"types" = "audio/x-flac",
+	"types" = "audio/ogg",
+	"types" = "audio/opus",
+	"types" = "audio/x-wav",
+	"types" = "audio/x-aiff",
+	"types" = "audio/x-matroska",
+	"types" = "audio/x-ms-wma",
+	"types" = "application/x-subrip",
+	"types" = "text/x-ssa",
+	"types" = "text/vtt"
+};

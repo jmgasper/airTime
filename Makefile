@@ -1,0 +1,83 @@
+# airTime: native Haiku build.
+#   make              builds build-haiku/airTime
+#   make package      builds artifacts/airtime-<version>-<arch>.hpkg
+#   make check-host   builds and runs the platform independent tests (Linux)
+#
+# FFmpeg comes from the system's ffmpeg6 and ffmpeg6_devel packages. Where
+# the devel package cannot be installed, point FFMPEG_CFLAGS and
+# FFMPEG_LDFLAGS at extracted headers and at a directory of links to the
+# libraries (tools/setup-ffmpeg-devel.sh makes one).
+.DEFAULT_GOAL := all
+CXX ?= g++
+BUILD ?= build-haiku
+RC ?= rc
+XRES ?= xres
+MIMESET ?= mimeset
+HAIKU_HEADERS ?= /boot/system/develop/headers
+
+FFMPEG_CFLAGS ?=
+FFMPEG_LDFLAGS ?=
+FFMPEG_LIBS ?= -lavformat -lavcodec -lavfilter -lswscale -lswresample -lavutil
+
+CPPFLAGS += -Isrc -Isrc/engine -Isrc/ui \
+	-I$(HAIKU_HEADERS)/private/media \
+	-I$(HAIKU_HEADERS)/private/shared \
+	-I$(HAIKU_HEADERS)/private/interface \
+	$(FFMPEG_CFLAGS) $(CROSS_CPPFLAGS)
+CXXFLAGS ?= -O2 -g
+CXXFLAGS += -std=c++17 -Wall -Wextra -Wno-multichar -Wno-unused-parameter \
+	-Wno-sign-compare -Wno-missing-field-initializers -pthread
+
+ENGINE_SRC = $(wildcard src/engine/*.cpp)
+UI_SRC = $(wildcard src/ui/*.cpp) $(wildcard src/*.cpp)
+APP_OBJ = $(ENGINE_SRC:%.cpp=$(BUILD)/%.o) $(UI_SRC:%.cpp=$(BUILD)/%.o)
+APP_LIBS = -lbe -lmedia -ltracker -ltranslation -llocalestub $(FFMPEG_LIBS)
+
+.PHONY: all engine package clean check check-host icon
+
+all: $(BUILD)/airTime
+
+engine: $(ENGINE_SRC:%.cpp=$(BUILD)/%.o)
+
+$(BUILD)/airTime: $(APP_OBJ) resources/airTime.rdef resources/branding/airtime-icon.hvif
+	$(CXX) $(APP_LDFLAGS) -pthread -o $@.new $(APP_OBJ) $(FFMPEG_LDFLAGS) $(APP_LIBS) $(APP_LDEND)
+	$(RC) -o $(BUILD)/airTime.rsrc resources/airTime.rdef
+	$(XRES) -o $@.new $(BUILD)/airTime.rsrc
+	$(MIMESET) -f $@.new
+	mv $@.new $@
+
+$(BUILD)/%.o: %.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -MMD -MP -c $< -o $@
+
+-include $(APP_OBJ:.o=.d)
+
+# Tests of the parts that do not need Haiku: time and language helpers,
+# subtitle markup, caption extraction. They build against the host's FFmpeg
+# and a few stand-ins for Haiku types (tests/host).
+HOST_CXX ?= g++
+HOST_BUILD ?= build-host
+HOST_FFMPEG_CFLAGS ?= $(shell pkg-config --cflags libavformat libavcodec libavutil 2>/dev/null \
+	|| echo -I/mnt/HaikuWork/artifacts/ffmpeg-arm64/stage/boot/system/non-packaged/include)
+HOST_FFMPEG_LIBS ?= $(shell pkg-config --libs libavformat libavcodec libavutil 2>/dev/null \
+	|| echo -l:libavformat.so.60 -l:libavcodec.so.60 -l:libavutil.so.58)
+TEST_SRC = tests/EngineTests.cpp src/engine/Tracks.cpp src/engine/Languages.cpp \
+	src/engine/Bitstream.cpp src/engine/Subtitles.cpp
+$(HOST_BUILD)/engine_tests: $(TEST_SRC) $(wildcard tests/host/*.h) $(wildcard src/engine/*.h)
+	@mkdir -p $(HOST_BUILD)
+	$(HOST_CXX) -std=c++17 -O1 -g -Wall -Wno-multichar -Itests/host -Isrc/engine \
+		$(HOST_FFMPEG_CFLAGS) -o $@ $(TEST_SRC) $(HOST_FFMPEG_LIBS) -pthread
+
+check-host: $(HOST_BUILD)/engine_tests
+	$(HOST_BUILD)/engine_tests
+
+check: check-host
+
+icon:
+	python3 tools/make-icon.py resources/branding/airtime-icon.hvif resources/branding/airtime-icon-preview.png
+
+package: all
+	tools/package-haiku.sh
+
+clean:
+	rm -rf $(BUILD) $(HOST_BUILD)

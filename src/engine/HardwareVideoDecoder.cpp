@@ -1,0 +1,685 @@
+/*
+ * Copyright 2026, air/OS contributors.
+ * Distributed under the terms of the MIT License.
+ */
+
+
+#include "VideoDecoder.h"
+
+#include <mutex>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <vector>
+
+#include <Directory.h>
+#include <Entry.h>
+#include <FindDirectory.h>
+#include <MediaFormats.h>
+#include <Path.h>
+#include <image.h>
+
+#include <DecoderPlugin.h>
+
+#include "Bitstream.h"
+#include "Tracks.h"
+
+
+namespace airtime {
+
+namespace {
+
+/*!	What one add-on can decode. The Media Kit's own lookup gives a format to
+	the first add-on that claims it and never falls back if that add-on then
+	refuses, so the limits of each one are written down here and airTime
+	only offers it streams it is known to handle.
+*/
+struct HardwareDecoderKind {
+	const char*		leafName;
+	const char*		displayName;
+	AVCodecID		codecs[4];
+	int				maxWidth;
+	int				maxHeight;
+	int				maxReferenceFrames;	// H.264 only; 0 = no limit
+	// The NVDEC add-on writes Cb Y0 Cr Y1 where Haiku's B_YCbCr422 means
+	// Y0 Cb Y1 Cr.
+	bool			chromaFirst;
+};
+
+const HardwareDecoderKind kKinds[] = {
+	// The NVDEC add-on of this fork: eight bit 4:2:0 progressive H.264.
+	// With 16 reference frames its picture store is one short and only the
+	// first pictures come out (see the add-on's notes), so those streams go
+	// to libavcodec.
+	{"nvdec", "NVDEC", {AV_CODEC_ID_H264, AV_CODEC_ID_NONE}, 4096, 4096, 15,
+		true},
+	// Rockchip MPP on the RK3588: RKVDEC for H.264 and HEVC, VPU981 for AV1,
+	// eight bit 4:2:0.
+	{"00_rockchip_mpp", "RK3588 VPU", {AV_CODEC_ID_H264, AV_CODEC_ID_HEVC,
+		AV_CODEC_ID_AV1, AV_CODEC_ID_NONE}, 8192, 4320, 0, false},
+};
+
+
+struct LoadedAddOn {
+	const HardwareDecoderKind*	kind;
+	BString						path;
+	image_id					image;
+	DecoderPlugin*				plugin;
+};
+
+
+std::mutex sAddOnLock;
+bool sAddOnsScanned = false;
+std::vector<LoadedAddOn> sAddOns;
+
+
+void
+scan_add_ons()
+{
+	// Called with sAddOnLock held.
+	if (sAddOnsScanned)
+		return;
+	sAddOnsScanned = true;
+
+	if (getenv("AIRTIME_NO_HARDWARE") != NULL)
+		return;
+
+	char** paths = NULL;
+	size_t count = 0;
+	if (find_paths(B_FIND_PATH_ADD_ONS_DIRECTORY, "media/plugins", &paths,
+			&count) != B_OK) {
+		return;
+	}
+
+	for (const HardwareDecoderKind& kind : kKinds) {
+		for (size_t i = 0; i < count; i++) {
+			BPath path(paths[i], kind.leafName);
+			BEntry entry(path.Path());
+			if (!entry.Exists())
+				continue;
+
+			image_id image = load_add_on(path.Path());
+			if (image < 0) {
+				fprintf(stderr, "airTime: could not load %s: %s\n",
+					path.Path(), strerror(image));
+				continue;
+			}
+			MediaPlugin* (*instantiate)() = NULL;
+			if (get_image_symbol(image, "instantiate_plugin",
+					B_SYMBOL_TYPE_TEXT, (void**)&instantiate) != B_OK
+				|| instantiate == NULL) {
+				unload_add_on(image);
+				continue;
+			}
+			MediaPlugin* plugin = instantiate();
+			DecoderPlugin* decoderPlugin
+				= dynamic_cast<DecoderPlugin*>(plugin);
+			if (decoderPlugin == NULL) {
+				delete plugin;
+				unload_add_on(image);
+				continue;
+			}
+			sAddOns.push_back(LoadedAddOn{&kind, path.Path(), image,
+				decoderPlugin});
+			// The first directory wins, as in the Media Kit.
+			break;
+		}
+	}
+	free(paths);
+}
+
+
+bool
+kind_handles_codec(const HardwareDecoderKind& kind, AVCodecID codec)
+{
+	for (AVCodecID candidate : kind.codecs) {
+		if (candidate == AV_CODEC_ID_NONE)
+			break;
+		if (candidate == codec)
+			return true;
+	}
+	return false;
+}
+
+
+/*!	The stream properties every add-on here needs: 8 bit 4:2:0, no fields,
+	no larger than the engine. */
+bool
+stream_is_eligible(const HardwareDecoderKind& kind, AVStream* stream,
+	BString* reason)
+{
+	AVCodecParameters* parameters = stream->codecpar;
+	if (!kind_handles_codec(kind, parameters->codec_id)) {
+		reason->SetToFormat("%s does not decode %s", kind.displayName,
+			avcodec_get_name(parameters->codec_id));
+		return false;
+	}
+	AVPixelFormat format = (AVPixelFormat)parameters->format;
+	if (format != AV_PIX_FMT_YUV420P && format != AV_PIX_FMT_YUVJ420P
+		&& format != AV_PIX_FMT_NONE) {
+		reason->SetToFormat("%s decodes 8 bit 4:2:0 only, this is %s",
+			kind.displayName, av_get_pix_fmt_name(format));
+		return false;
+	}
+	if (parameters->field_order != AV_FIELD_UNKNOWN
+		&& parameters->field_order != AV_FIELD_PROGRESSIVE) {
+		reason->SetToFormat("%s does not decode interlaced pictures",
+			kind.displayName);
+		return false;
+	}
+	if (parameters->width <= 0 || parameters->height <= 0
+		|| parameters->width > kind.maxWidth
+		|| parameters->height > kind.maxHeight) {
+		reason->SetToFormat("%dx%d is outside what %s decodes",
+			parameters->width, parameters->height, kind.displayName);
+		return false;
+	}
+
+	if (parameters->codec_id == AV_CODEC_ID_H264) {
+		H264SequenceInfo info;
+		int lengthSize = nal_length_size(false, parameters->extradata,
+			parameters->extradata_size);
+		if (find_h264_sps(parameters->extradata, parameters->extradata_size,
+				lengthSize, &info)) {
+			if (info.chromaFormat != 1 || info.bitDepthLuma != 8
+				|| info.bitDepthChroma != 8) {
+				reason->SetToFormat("%s decodes 8 bit 4:2:0 H.264 only",
+					kind.displayName);
+				return false;
+			}
+			if (!info.frameMbsOnly) {
+				reason->SetToFormat("the stream may contain fields, which %s "
+					"does not decode", kind.displayName);
+				return false;
+			}
+			int maxReferences = kind.maxReferenceFrames;
+			const char* override = getenv("AIRTIME_NVDEC_MAX_REFERENCES");
+			if (override != NULL && strcmp(kind.leafName, "nvdec") == 0)
+				maxReferences = atoi(override);
+			if (maxReferences > 0
+				&& info.maxReferenceFrames > maxReferences) {
+				reason->SetToFormat("%d reference frames, %s holds %d",
+					info.maxReferenceFrames, kind.displayName, maxReferences);
+				return false;
+			}
+		}
+		// Without parameter sets in the extra data (a transport stream),
+		// there is nothing to check yet; the watchdog catches a refusal.
+	}
+	if (parameters->codec_id == AV_CODEC_ID_HEVC
+		&& parameters->profile != FF_PROFILE_UNKNOWN
+		&& parameters->profile != FF_PROFILE_HEVC_MAIN) {
+		reason->SetToFormat("%s decodes HEVC Main (8 bit) only",
+			kind.displayName);
+		return false;
+	}
+	return true;
+}
+
+
+class MediaKitVideoDecoder;
+
+
+/*!	Libmedia's Decoder owns its chunk provider and deletes it with itself, so
+	the add-on gets this go-between rather than the decoder object. */
+class ChunkForwarder : public BPrivate::media::ChunkProvider {
+public:
+	ChunkForwarder(MediaKitVideoDecoder* decoder)
+		:
+		fDecoder(decoder)
+	{
+	}
+
+	status_t GetNextChunk(const void** chunk, size_t* size,
+		media_header* header);
+
+private:
+	MediaKitVideoDecoder*	fDecoder;
+};
+
+
+class MediaKitVideoDecoder : public VideoDecoder {
+public:
+	MediaKitVideoDecoder(const LoadedAddOn& addOn, AVStream* stream,
+		PacketQueue* queue, bigtime_t startTime)
+		:
+		VideoDecoder(stream, queue, startTime),
+		fAddOn(addOn),
+		fDecoder(NULL),
+		fChunk(av_packet_alloc()),
+		fPending(av_packet_alloc()),
+		fHasPending(false),
+		fPendingSerial(-1),
+		fFlushPending(false),
+		fEndOfStream(false),
+		fDrained(false),
+		fCanceled(false),
+		fFailed(false),
+		fWidth(0),
+		fHeight(0),
+		fRowBytes(0),
+		fFrameDuration(_FrameDuration())
+	{
+	}
+
+	~MediaKitVideoDecoder()
+	{
+		delete fDecoder;
+		av_packet_free(&fChunk);
+		av_packet_free(&fPending);
+	}
+
+	status_t Init(BString* reason)
+	{
+		AVCodecParameters* parameters = fStream->codecpar;
+
+		media_format_description description;
+		description.family = B_MISC_FORMAT_FAMILY;
+		description.u.misc.file_format = 'ffmp';
+		description.u.misc.codec = parameters->codec_id;
+
+		media_format format;
+		BMediaFormats formats;
+		status_t status = formats.InitCheck();
+		if (status == B_OK)
+			status = formats.GetFormatFor(description, &format);
+		if (status != B_OK) {
+			// Nobody registered it yet (normally the ffmpeg add-on does).
+			format.Clear();
+			format.type = B_MEDIA_ENCODED_VIDEO;
+			status = formats.MakeFormatFor(&description, 1, &format);
+		}
+		if (status != B_OK) {
+			reason->SetToFormat("the Media Kit has no format for %s: %s",
+				avcodec_get_name(parameters->codec_id), strerror(status));
+			return status;
+		}
+
+		format.type = B_MEDIA_ENCODED_VIDEO;
+		format.user_data_type = B_CODEC_TYPE_INFO;
+		*(uint32*)format.user_data = parameters->codec_tag;
+		format.user_data[4] = 0;
+		format.require_flags = 0;
+		format.deny_flags = B_MEDIA_MAUI_UNDEFINED_FLAGS;
+
+		media_raw_video_format& output = format.u.encoded_video.output;
+		AVRational rate = av_guess_frame_rate(NULL, fStream, NULL);
+		output.field_rate = rate.num > 0 && rate.den > 0
+			? (float)av_q2d(rate) : 0.0f;
+		output.interlace = 1;
+		output.first_active = 0;
+		output.last_active = parameters->height - 1;
+		output.orientation = B_VIDEO_TOP_LEFT_RIGHT;
+		AVRational aspect = parameters->sample_aspect_ratio;
+		if (aspect.num <= 0 || aspect.den <= 0)
+			aspect = AVRational{1, 1};
+		AVRational display;
+		av_reduce(&display.num, &display.den,
+			(int64)parameters->width * aspect.num,
+			(int64)parameters->height * aspect.den, 65535);
+		output.pixel_width_aspect = display.num;
+		output.pixel_height_aspect = display.den;
+		output.display.format = B_YCbCr420;
+		output.display.line_width = parameters->width;
+		output.display.line_count = parameters->height;
+		output.display.bytes_per_row = 0;
+		output.display.pixel_offset = 0;
+		output.display.line_offset = 0;
+		output.display.flags = 0;
+
+		fDecoder = fAddOn.plugin->NewDecoder(0);
+		if (fDecoder == NULL) {
+			reason->SetTo("the add-on made no decoder");
+			return B_NO_MEMORY;
+		}
+		fDecoder->SetChunkProvider(new ChunkForwarder(this));
+
+		media_format encoded = format;
+		status = fDecoder->Setup(&encoded, parameters->extradata,
+			parameters->extradata_size);
+		if (status != B_OK) {
+			reason->SetToFormat("%s refused the stream: %s",
+				fAddOn.kind->displayName, strerror(status));
+			return status;
+		}
+		fEncodedFormat = encoded;
+		fWidth = parameters->width;
+		fHeight = parameters->height;
+		return B_OK;
+	}
+
+	BString Name() const
+	{
+		BString name;
+		name.SetToFormat("%s (%s)", fAddOn.kind->displayName,
+			fCodecName.Length() > 0 ? fCodecName.String() : "hardware");
+		return name;
+	}
+
+	bool IsHardware() const
+	{
+		return true;
+	}
+
+	status_t Decode(VideoFramePtr& output)
+	{
+		for (;;) {
+			if (fCanceled)
+				return B_CANCELED;
+			if (fFailed)
+				return B_ERROR;
+			if (fFlushPending) {
+				fDecoder->SeekedTo(0, 0);
+				fFlushPending = false;
+				fEndOfStream = false;
+				fDrained = false;
+				fSerial = fPendingSerial;
+				fPacketsWithoutFrame = 0;
+				// A seek between two Decode() calls: let the caller see the
+				// new serial before decoding carries on.
+				return B_INTERRUPTED;
+			}
+			if (fDrained && !fQueue->HasNewerSerial(fSerial))
+				return B_LAST_BUFFER_ERROR;
+
+			if (fRowBytes == 0) {
+				status_t status = _NegotiateOutput();
+				if (fFlushPending || fCanceled)
+					continue;
+				if (status != B_OK)
+					return status;
+			}
+
+			VideoFramePtr frame = std::make_shared<VideoFrame>();
+			AVFrame* picture = frame->frame;
+			picture->format = fPixelFormat;
+			picture->width = fWidth;
+			picture->height = fHeight;
+			// Rows exactly as wide as the add-on writes them.
+			if (av_frame_get_buffer(picture, 1) < 0)
+				return B_NO_MEMORY;
+			if (picture->linesize[0] != (int)fRowBytes) {
+				fprintf(stderr, "airTime: unexpected row length %d != %zu\n",
+					picture->linesize[0], fRowBytes);
+				return B_ERROR;
+			}
+
+			media_header header;
+			memset(&header, 0, sizeof(header));
+			media_decode_info info;
+			bigtime_t skip = fSkipBefore;
+			// The NVDEC add-on leaves pictures before an accurate seek's
+			// target in the card's arrangement when told so.
+			info.time_to_decode = skip > 0 ? -(skip + fStartTime) : 0;
+			int64 count = 0;
+			status_t status = fDecoder->Decode(picture->data[0], &count,
+				&header, &info);
+			if (fFlushPending || fCanceled || fFailed)
+				continue;
+			if (status != B_OK) {
+				if (fEndOfStream) {
+					// Everything the decoder held has come out.
+					fDrained = true;
+					return B_LAST_BUFFER_ERROR;
+				}
+				return status;
+			}
+			if (count < 1)
+				continue;
+
+			fPacketsWithoutFrame = 0;
+			frame->pts = _MediaTime(header.start_time);
+			frame->duration = fFrameDuration;
+			frame->serial = fSerial;
+			frame->hardware = true;
+			frame->frame->sample_aspect_ratio
+				= fStream->codecpar->sample_aspect_ratio;
+			frame->frame->colorspace = fStream->codecpar->color_space;
+			frame->frame->color_range = fStream->codecpar->color_range;
+			output = frame;
+			return B_OK;
+		}
+	}
+
+	// For the ChunkForwarder
+	status_t GetNextChunk(const void** chunk, size_t* size,
+		media_header* header)
+	{
+		if (fFlushPending)
+			return B_INTERRUPTED;
+		if (fFailed || fCanceled)
+			return B_ERROR;
+		// An add-on that takes packet after packet without giving a picture
+		// back has refused the stream without saying so (the NVDEC add-on
+		// skips pictures it cannot decode); give up on it.
+		if (fPacketsWithoutFrame > 150) {
+			fFailed = true;
+			return B_ERROR;
+		}
+
+		if (fEndOfStream) {
+			if (fQueue->HasNewerSerial(fSerial)) {
+				fFlushPending = true;
+				fPendingSerial = fQueue->Serial();
+				return B_INTERRUPTED;
+			}
+			return B_LAST_BUFFER_ERROR;
+		}
+
+		for (;;) {
+			av_packet_unref(fChunk);
+			int serial;
+			if (fHasPending) {
+				av_packet_move_ref(fChunk, fPending);
+				serial = fPendingSerial;
+				fHasPending = false;
+			} else {
+				int got = fQueue->Get(fChunk, &serial, 100000);
+				if (got < 0) {
+					fCanceled = true;
+					return B_CANCELED;
+				}
+				if (got == 0) {
+					// Flushed with nothing behind it yet: unwind so the
+					// decoder is reset before the next packet.
+					if (fQueue->HasNewerSerial(fSerial) && fSerial >= 0) {
+						fFlushPending = true;
+						fPendingSerial = fQueue->Serial();
+						return B_INTERRUPTED;
+					}
+					continue;
+				}
+			}
+
+			if (fSerial < 0)
+				fSerial = serial;
+			if (serial != fSerial) {
+				av_packet_move_ref(fPending, fChunk);
+				fHasPending = true;
+				fPendingSerial = serial;
+				fFlushPending = true;
+				return B_INTERRUPTED;
+			}
+
+			if (fChunk->data == NULL) {
+				fEndOfStream = true;
+				return B_LAST_BUFFER_ERROR;
+			}
+			if (fKeyframesOnly && (fChunk->flags & AV_PKT_FLAG_KEY) == 0)
+				continue;
+
+			fPacketsWithoutFrame++;
+			int64 timestamp = fChunk->pts != AV_NOPTS_VALUE
+				? fChunk->pts : fChunk->dts;
+			bigtime_t time = to_micros(timestamp, fStream->time_base);
+			memset(header, 0, sizeof(*header));
+			header->type = B_MEDIA_ENCODED_VIDEO;
+			header->start_time = time == kNoTime ? 0 : time;
+			header->size_used = fChunk->size;
+			header->file_pos = fChunk->pos;
+			header->orig_size = fChunk->size;
+			header->u.encoded_video.field_flags
+				= (fChunk->flags & AV_PKT_FLAG_KEY) != 0
+					? B_MEDIA_KEY_FRAME : 0;
+			*chunk = fChunk->data;
+			*size = fChunk->size;
+			return B_OK;
+		}
+	}
+
+private:
+	status_t _NegotiateOutput()
+	{
+		// Luma and chroma are cheaper for an add-on to hand over than
+		// pixels, and the conversion to pixels happens anyway while scaling
+		// to the window; ask for them first.
+		media_format format;
+		status_t status = B_ERROR;
+		static const color_space kSpaces[] = {B_YCbCr422, B_RGB32};
+		const char* forced = getenv("AIRTIME_HW_RGB");
+		for (color_space space : kSpaces) {
+			if (space == B_YCbCr422 && forced != NULL)
+				continue;
+			format.Clear();
+			format.type = B_MEDIA_RAW_VIDEO;
+			format.u.raw_video = media_raw_video_format::wildcard;
+			format.u.raw_video.display.format = space;
+			status = fDecoder->NegotiateOutputFormat(&format);
+			if (status == B_OK && format.type == B_MEDIA_RAW_VIDEO
+				&& format.u.raw_video.display.format == space) {
+				break;
+			}
+			if (fFlushPending || fCanceled)
+				return B_INTERRUPTED;
+		}
+		if (status != B_OK)
+			return status;
+		if (format.type != B_MEDIA_RAW_VIDEO)
+			return B_MEDIA_BAD_FORMAT;
+
+		const media_video_display_info& display = format.u.raw_video.display;
+		switch (display.format) {
+			case B_RGB32:
+			case B_RGBA32:
+				fPixelFormat = AV_PIX_FMT_BGRA;
+				break;
+			case B_YCbCr422:
+				fPixelFormat = fAddOn.kind->chromaFirst
+					? AV_PIX_FMT_UYVY422 : AV_PIX_FMT_YUYV422;
+				break;
+			default:
+				fprintf(stderr, "airTime: %s offers colour space %#x\n",
+					fAddOn.kind->displayName, (unsigned)display.format);
+				return B_MEDIA_BAD_FORMAT;
+		}
+		if (display.line_width > 0)
+			fWidth = display.line_width;
+		if (display.line_count > 0)
+			fHeight = display.line_count;
+		fRowBytes = display.bytes_per_row > 0 ? display.bytes_per_row
+			: (size_t)fWidth * (fPixelFormat == AV_PIX_FMT_BGRA ? 4 : 2);
+
+		media_codec_info codecInfo;
+		memset(&codecInfo, 0, sizeof(codecInfo));
+		fDecoder->GetCodecInfo(&codecInfo);
+		fCodecName = codecInfo.short_name;
+		return B_OK;
+	}
+
+	const LoadedAddOn&	fAddOn;
+	Decoder*			fDecoder;
+	media_format		fEncodedFormat;
+	AVPacket*			fChunk;
+	AVPacket*			fPending;
+	bool				fHasPending;
+	int					fPendingSerial;
+	bool				fFlushPending;
+	bool				fEndOfStream;
+	bool				fDrained;
+	bool				fCanceled;
+	bool				fFailed;
+	int					fWidth;
+	int					fHeight;
+	size_t				fRowBytes;
+	AVPixelFormat		fPixelFormat;
+	bigtime_t			fFrameDuration;
+	BString				fCodecName;
+};
+
+status_t
+ChunkForwarder::GetNextChunk(const void** chunk, size_t* size,
+	media_header* header)
+{
+	return fDecoder->GetNextChunk(chunk, size, header);
+}
+
+}	// namespace
+
+
+VideoDecoder*
+create_hardware_decoder(AVStream* stream, PacketQueue* queue,
+	bigtime_t startTime, BString* reason)
+{
+	std::lock_guard<std::mutex> lock(sAddOnLock);
+	scan_add_ons();
+
+	*reason = "no hardware video decoder is installed";
+	for (const LoadedAddOn& addOn : sAddOns) {
+		if (!kind_handles_codec(*addOn.kind, stream->codecpar->codec_id))
+			continue;
+		if (!stream_is_eligible(*addOn.kind, stream, reason))
+			continue;
+		MediaKitVideoDecoder* decoder = new(std::nothrow) MediaKitVideoDecoder(
+			addOn, stream, queue, startTime);
+		if (decoder == NULL)
+			return NULL;
+		if (decoder->Init(reason) != B_OK) {
+			delete decoder;
+			continue;
+		}
+		return decoder;
+	}
+	if (reason->Length() == 0 || *reason == "no hardware video decoder is installed") {
+		bool any = false;
+		for (const LoadedAddOn& addOn : sAddOns) {
+			if (!kind_handles_codec(*addOn.kind, stream->codecpar->codec_id))
+				continue;
+			any = true;
+		}
+		if (!sAddOns.empty() && !any) {
+			reason->SetToFormat("no hardware decoder for %s",
+				avcodec_get_name(stream->codecpar->codec_id));
+		}
+	}
+	return NULL;
+}
+
+
+BString
+hardware_decoder_summary()
+{
+	std::lock_guard<std::mutex> lock(sAddOnLock);
+	scan_add_ons();
+
+	BString summary;
+	for (const LoadedAddOn& addOn : sAddOns) {
+		if (summary.Length() > 0)
+			summary << ", ";
+		summary << addOn.kind->displayName << " (";
+		bool first = true;
+		for (AVCodecID codec : addOn.kind->codecs) {
+			if (codec == AV_CODEC_ID_NONE)
+				break;
+			if (!first)
+				summary << ", ";
+			summary << codec_display_name(codec);
+			first = false;
+		}
+		summary << ")";
+	}
+	if (summary.Length() == 0)
+		summary = "none";
+	return summary;
+}
+
+}	// namespace airtime
