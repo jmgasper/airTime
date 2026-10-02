@@ -7,6 +7,7 @@
 #include "VideoView.h"
 
 #include <algorithm>
+#include <chrono>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,6 +39,7 @@ VideoView::VideoView(BRect frame, const BMessenger& target)
 	fFullScreen(false),
 	fComposeTime(0),
 	fDrawTime(0),
+	fDirectStale(false),
 	fDirectConnected(false),
 	fDirectAllowed(getenv("AIRTIME_NO_DIRECT") == NULL),
 	fDirectUsed(false),
@@ -167,7 +169,7 @@ VideoView::SetCoveredBottom(float top)
 	{
 		// A child view over the picture: the frame buffer copy would paint
 		// over it, so the server draws while it is there.
-		std::lock_guard<std::mutex> lock(fDirectLock);
+		std::lock_guard<std::timed_mutex> lock(fDirectLock);
 		fCovered = top >= 0;
 	}
 	{
@@ -316,7 +318,18 @@ VideoView::DisplayFrame(const VideoFramePtr& frame)
 void
 VideoView::DirectConnected(direct_buffer_info* info)
 {
-	std::lock_guard<std::mutex> lock(fDirectLock);
+	// The app_server gives a window half a second to answer before it ends
+	// its frame buffer access for good. Answer in time even if a picture is
+	// still being copied: stop drawing directly until the next change.
+	std::unique_lock<std::timed_mutex> lock(fDirectLock,
+		std::chrono::milliseconds(200));
+	if (!lock.owns_lock()) {
+		fDirectStale = true;
+		fprintf(stderr, "airTime: a frame buffer change came while a picture "
+			"was being drawn; drawing through the app_server for now\n");
+		return;
+	}
+	fDirectStale = false;
 	fDirectDaemon = find_thread(NULL);
 	switch (info->buffer_state & B_DIRECT_MODE_MASK) {
 		case B_DIRECT_START:
@@ -393,7 +406,7 @@ VideoView::_DirectScale()
 {
 	if (!fDirectAllowed)
 		return 1.0f;
-	std::lock_guard<std::mutex> lock(fDirectLock);
+	std::lock_guard<std::timed_mutex> lock(fDirectLock);
 	if (!_DirectStillConnected() || fCovered || fDirectBits == NULL)
 		return 1.0f;
 	return fDirectScale;
@@ -406,7 +419,7 @@ VideoView::_DirectScale()
 bool
 VideoView::_DirectStillConnected()
 {
-	if (!fDirectConnected)
+	if (!fDirectConnected || fDirectStale)
 		return false;
 	thread_info info;
 	if (fDirectDaemon >= 0 && get_thread_info(fDirectDaemon, &info) != B_OK) {
@@ -447,7 +460,7 @@ VideoView::UpdateWindowOrigin()
 	// Called with the window locked.
 	BPoint origin = ConvertToScreen(BPoint(0, 0))
 		- Window()->ConvertToScreen(BPoint(0, 0));
-	std::lock_guard<std::mutex> lock(fDirectLock);
+	std::lock_guard<std::timed_mutex> lock(fDirectLock);
 	fWindowOrigin = origin;
 }
 
@@ -459,7 +472,7 @@ VideoView::_DrawDirect(BBitmap* bitmap, BRect rect)
 		fDirectUsed = false;
 		return false;
 	}
-	std::lock_guard<std::mutex> lock(fDirectLock);
+	std::lock_guard<std::timed_mutex> lock(fDirectLock);
 	if (!_DirectStillConnected() || fCovered || fDirectBits == NULL) {
 		fDirectUsed = false;
 		return false;

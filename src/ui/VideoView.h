@@ -112,7 +112,10 @@ private:
 
 			// Direct frame buffer access, guarded by fDirectLock; the window
 			// waits for a copy in progress before the buffer goes away.
-			std::mutex			fDirectLock;
+			std::timed_mutex	fDirectLock;
+			// DirectConnected() could not wait for the lock: what is known
+			// of the clipping may be out of date until the next one.
+			std::atomic<bool>	fDirectStale;
 			bool				fDirectConnected;
 			std::atomic<bool>	fDirectAllowed;
 			std::atomic<bool>	fDirectUsed;
