@@ -52,10 +52,12 @@ make_track_info(AVStream* stream)
 		tag = av_dict_get(stream->metadata, "handler_name", NULL, 0);
 	if (tag != NULL) {
 		info.title = tag->value;
-		// Container defaults that say nothing.
-		if (info.title == "SoundHandler" || info.title == "VideoHandler"
-			|| info.title == "SubtitleHandler" || info.title.StartsWith("Core Media")
-			|| info.title == "ISO Media file produced by Google Inc.")
+		// Container defaults that say nothing ("SoundHandler", "GPAC ISO
+		// Audio Handler", "Core Media Audio", "Mainconcept MP4 Sound Media
+		// Handler").
+		if (info.title.IFindFirst("handler") >= 0
+			|| info.title.StartsWith("Core Media")
+			|| info.title.IFindFirst("produced by") >= 0)
 			info.title = "";
 	}
 
@@ -64,6 +66,8 @@ make_track_info(AVStream* stream)
 	info.isForced = (disposition & AV_DISPOSITION_FORCED) != 0;
 	info.isHearingImpaired = (disposition & AV_DISPOSITION_HEARING_IMPAIRED) != 0;
 	info.isCommentary = (disposition & AV_DISPOSITION_COMMENT) != 0;
+	info.isDescription = (disposition & (AV_DISPOSITION_VISUAL_IMPAIRED
+		| AV_DISPOSITION_DESCRIPTIONS)) != 0;
 
 	switch (parameters->codec_type) {
 		case AVMEDIA_TYPE_VIDEO:
@@ -1705,7 +1709,8 @@ Player::_Show(const VideoFramePtr& frame)
 		std::lock_guard<std::mutex> lock(fLock);
 		sink = fSink;
 	}
-	if (sink != NULL && !sink->DisplayFrame(frame))
+	// Nobody to show it to (between files): it was not shown.
+	if (sink == NULL || !sink->DisplayFrame(frame))
 		return false;
 
 	fFramesShown++;

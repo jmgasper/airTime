@@ -6,6 +6,9 @@
 #define AIRTIME_FRAME_RENDERER_H
 
 
+#include <memory>
+#include <vector>
+
 #include "FFmpeg.h"
 
 
@@ -24,7 +27,10 @@ public:
 
 private:
 			bool				_Prepare(const AVFrame* frame, int width,
-									int height);
+									int height, bool hdr);
+			bool				_RenderHDR(const AVFrame* frame, uint8* bits,
+									int32 bytesPerRow, int width, int height);
+			void				_PrepareToneMapping(const AVFrame* frame);
 
 			SwsContext*			fContext;
 			int					fSourceWidth;
@@ -34,8 +40,18 @@ private:
 			int					fRange;
 			int					fWidth;
 			int					fHeight;
+			bool				fHDR;
 			AVFrame*			fSource;
 			AVFrame*			fTarget;
+
+			// High dynamic range: PQ or HLG, BT.2020, shown on an ordinary
+			// display.
+			std::vector<uint16>	fLinear;		// R'G'B' 16 bit, scaled
+			std::vector<float>	fTransfer;		// code -> linear, 1 = SDR white
+			std::vector<uint8>	fEncode;		// linear -> sRGB, 4096 steps
+			int					fTransferKind;
+			float				fPeak;			// content peak, 1 = SDR white
+			std::unique_ptr<class WorkerPool> fPool;
 };
 
 }	// namespace airtime

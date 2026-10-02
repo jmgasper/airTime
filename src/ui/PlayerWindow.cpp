@@ -237,6 +237,9 @@ PlayerWindow::OpenFile(const entry_ref& ref, bool play, BString* error)
 
 	fPlayer->SetPreferredLanguages(settings().audioLanguage.String(),
 		settings().subtitleLanguage.String());
+	// The view first, so that the first picture has somewhere to go.
+	fVideo->SetPlayer(fPlayer);
+	fPlayer->SetVideoSink(fVideo);
 	status_t status = fPlayer->Open(path.Path(), error);
 	fHasFile = status == B_OK;
 	if (status != B_OK) {
@@ -250,8 +253,8 @@ PlayerWindow::OpenFile(const entry_ref& ref, bool play, BString* error)
 	be_roster->AddToRecentDocuments(&ref, kAppSignature);
 
 	SetTitle(ref.name);
+	// Again, now that the player knows the picture's shape.
 	fVideo->SetPlayer(fPlayer);
-	fPlayer->SetVideoSink(fVideo);
 
 	bool hasVideo = fPlayer->HasVideo();
 	fVideo->SetAudioOnly(!hasVideo);

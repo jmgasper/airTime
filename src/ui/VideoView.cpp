@@ -61,7 +61,7 @@ VideoView::AttachedToWindow()
 void
 VideoView::SetPlayer(Player* player)
 {
-	{
+	if (player != fPlayer) {
 		std::lock_guard<std::mutex> render(fRenderLock);
 		fPlayer = player;
 		fLastFrame.reset();
@@ -122,8 +122,10 @@ void
 VideoView::Refresh()
 {
 	fDirty = true;
-	if (fPlayer == NULL || !fPlayer->IsPlaying() || fPlayer->IsScanning())
+	if (fPlayer == NULL || !fPlayer->IsPlaying() || fPlayer->IsScanning()
+		|| !fPlayer->HasMovingVideo()) {
 		Invalidate(VideoFrame());
+	}
 }
 
 
@@ -284,9 +286,11 @@ VideoView::Draw(BRect updateRect)
 		}
 	}
 
-	bool playing = fPlayer != NULL && fPlayer->IsPlaying()
-		&& !fPlayer->IsScanning();
-	if (fDirty && !playing && fLastFrame.get() != NULL
+	// While a film plays, the next picture comes soon enough; a still
+	// (paused, or album art) is made again here at the new size.
+	bool presenterDraws = fPlayer != NULL && fPlayer->IsPlaying()
+		&& !fPlayer->IsScanning() && fPlayer->HasMovingVideo();
+	if (fDirty && !presenterDraws && fLastFrame.get() != NULL
 		&& fRenderLock.try_lock()) {
 		int next = fCurrent ^ 1;
 		if (_Compose(fLastFrame, next, rect.IntegerWidth() + 1,

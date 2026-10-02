@@ -32,6 +32,7 @@ TrackInfo::TrackInfo()
 	isForced(false),
 	isHearingImpaired(false),
 	isCommentary(false),
+	isDescription(false),
 	isBitmap(false),
 	isCaptions(false)
 {
@@ -81,6 +82,8 @@ TrackInfo::Label(int number) const
 		label << " [Forced]";
 	if (isCommentary && title.IFindFirst("comment") < 0)
 		label << " [Commentary]";
+	if (isDescription && title.IFindFirst("descri") < 0)
+		label << " [Audio Description]";
 	return label;
 }
 

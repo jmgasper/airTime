@@ -39,6 +39,7 @@ struct TrackInfo {
 	bool				isForced;
 	bool				isHearingImpaired;
 	bool				isCommentary;
+	bool				isDescription;	// audio description
 	bool				isBitmap;		// picture based subtitles
 	bool				isCaptions;		// CEA-608/708 closed captions
 
