@@ -172,7 +172,7 @@ App::ArgvReceived(int32 argc, char** argv)
 			continue;
 		}
 		if (strcmp(argument, "--no-hardware") == 0) {
-			settings().hardwareDecoding = false;
+			settings().noHardwareThisRun = true;
 			continue;
 		}
 		if (strcmp(argument, "--start") == 0 && i + 1 < argc) {

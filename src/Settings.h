@@ -18,6 +18,8 @@ struct Settings {
 	float		subtitleScale;
 	bool		loop;
 	bool		hardwareDecoding;
+	// --no-hardware: off for this run only, not saved.
+	bool		noHardwareThisRun;
 	bool		snapToAspect;
 	bool		autoPlay;
 	int32		timeDisplay;

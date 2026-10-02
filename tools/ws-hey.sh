@@ -15,7 +15,7 @@ for command in "$@"; do
 			rest=${command#* }
 			property=${rest%% to *}
 			value=""
-			[[ "$rest" == *" to "* ]] && value=" to ${rest#* to }"
+			[[ "$rest" == *" to "* ]] && value=" to $(printf %q "${rest#* to }")"
 			SCRIPT+=$'\n'"printf '%s: ' \"$command\"; hey \$A $verb $property of Window 0$value 2>&1 | grep -E 'result|message|error' | grep -v 'error.*: 0 (0x' | sed -e 's/^ *//' | tr '\n' ' '; echo"
 			;;
 	esac

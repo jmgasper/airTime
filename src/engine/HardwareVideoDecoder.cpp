@@ -34,12 +34,17 @@ namespace {
 	refuses, so the limits of each one are written down here and airTime
 	only offers it streams it is known to handle.
 */
+struct CodecLimits {
+	AVCodecID		codec;
+	int				maxWidth;
+	int				maxHeight;
+	int				maxBitDepth;
+};
+
 struct HardwareDecoderKind {
 	const char*		leafName;
 	const char*		displayName;
-	AVCodecID		codecs[4];
-	int				maxWidth;
-	int				maxHeight;
+	CodecLimits		codecs[4];
 	int				maxReferenceFrames;	// H.264 only; 0 = no limit
 	// The NVDEC add-on writes Cb Y0 Cr Y1 where Haiku's B_YCbCr422 means
 	// Y0 Cb Y1 Cr.
@@ -47,17 +52,25 @@ struct HardwareDecoderKind {
 };
 
 const HardwareDecoderKind kKinds[] = {
-	// The NVDEC add-on of this fork: eight bit 4:2:0 progressive H.264.
-	// With 16 reference frames its picture store is one short and only the
-	// first pictures come out (see the add-on's notes), so those streams go
-	// to libavcodec.
-	{"nvdec", "NVDEC", {AV_CODEC_ID_H264, AV_CODEC_ID_NONE}, 4096, 4096, 15,
-		true},
+	// The NVDEC add-on of this fork: eight bit 4:2:0 progressive H.264, and
+	// HEVC Main and Main 10 (which the add-on does not offer the Media Kit:
+	// it is only asked here, where a refusal falls back to libavcodec).
+	// With 16 reference frames its H.264 picture store is one short and
+	// only the first pictures come out (see the add-on's notes), so those
+	// streams go to libavcodec.
+	{"nvdec", "NVDEC", {{AV_CODEC_ID_H264, 4096, 4096, 8},
+		{AV_CODEC_ID_HEVC, 8192, 8192, 10}, {AV_CODEC_ID_NONE, 0, 0, 0}},
+		15, true},
 	// Rockchip MPP on the RK3588: RKVDEC for H.264 and HEVC, VPU981 for AV1,
 	// eight bit 4:2:0.
-	{"00_rockchip_mpp", "RK3588 VPU", {AV_CODEC_ID_H264, AV_CODEC_ID_HEVC,
-		AV_CODEC_ID_AV1, AV_CODEC_ID_NONE}, 8192, 4320, 0, false},
+	{"00_rockchip_mpp", "RK3588 VPU", {{AV_CODEC_ID_H264, 8192, 4320, 8},
+		{AV_CODEC_ID_HEVC, 8192, 4320, 8}, {AV_CODEC_ID_AV1, 8192, 4320, 8},
+		{AV_CODEC_ID_NONE, 0, 0, 0}}, 0, false},
 };
+
+// Not one of Haiku's colour spaces: the NVDEC add-on's sixteen-bit 4:2:0,
+// a plane of luma then one of Cb and Cr in pairs, both bytes_per_row apart.
+const color_space kColorSpaceP010 = (color_space)0x50303130;	// 'P010'
 
 
 struct LoadedAddOn {
@@ -129,36 +142,55 @@ scan_add_ons()
 }
 
 
-bool
-kind_handles_codec(const HardwareDecoderKind& kind, AVCodecID codec)
+const CodecLimits*
+limits_for(const HardwareDecoderKind& kind, AVCodecID codec)
 {
-	for (AVCodecID candidate : kind.codecs) {
-		if (candidate == AV_CODEC_ID_NONE)
+	for (const CodecLimits& candidate : kind.codecs) {
+		if (candidate.codec == AV_CODEC_ID_NONE)
 			break;
-		if (candidate == codec)
-			return true;
+		if (candidate.codec == codec)
+			return &candidate;
 	}
-	return false;
+	return NULL;
 }
 
 
-/*!	The stream properties every add-on here needs: 8 bit 4:2:0, no fields,
-	no larger than the engine. */
+bool
+kind_handles_codec(const HardwareDecoderKind& kind, AVCodecID codec)
+{
+	return limits_for(kind, codec) != NULL;
+}
+
+
+bool
+is_ten_bit(const AVCodecParameters* parameters)
+{
+	return parameters->format == AV_PIX_FMT_YUV420P10LE
+		|| (parameters->codec_id == AV_CODEC_ID_HEVC
+			&& parameters->profile == FF_PROFILE_HEVC_MAIN_10);
+}
+
+
+/*!	The stream properties every add-on here needs: 4:2:0 of a depth the
+	engine decodes, no fields, no larger than the engine. */
 bool
 stream_is_eligible(const HardwareDecoderKind& kind, AVStream* stream,
 	BString* reason)
 {
 	AVCodecParameters* parameters = stream->codecpar;
-	if (!kind_handles_codec(kind, parameters->codec_id)) {
+	const CodecLimits* limits = limits_for(kind, parameters->codec_id);
+	if (limits == NULL) {
 		reason->SetToFormat("%s does not decode %s", kind.displayName,
 			avcodec_get_name(parameters->codec_id));
 		return false;
 	}
 	AVPixelFormat format = (AVPixelFormat)parameters->format;
+	bool tenBit = format == AV_PIX_FMT_YUV420P10LE;
 	if (format != AV_PIX_FMT_YUV420P && format != AV_PIX_FMT_YUVJ420P
-		&& format != AV_PIX_FMT_NONE) {
-		reason->SetToFormat("%s decodes 8 bit 4:2:0 only, this is %s",
-			kind.displayName, av_get_pix_fmt_name(format));
+		&& format != AV_PIX_FMT_NONE && !(tenBit && limits->maxBitDepth >= 10)) {
+		reason->SetToFormat("%s decodes %d bit 4:2:0 %s only, this is %s",
+			kind.displayName, limits->maxBitDepth,
+			avcodec_get_name(parameters->codec_id), av_get_pix_fmt_name(format));
 		return false;
 	}
 	if (parameters->field_order != AV_FIELD_UNKNOWN
@@ -168,8 +200,8 @@ stream_is_eligible(const HardwareDecoderKind& kind, AVStream* stream,
 		return false;
 	}
 	if (parameters->width <= 0 || parameters->height <= 0
-		|| parameters->width > kind.maxWidth
-		|| parameters->height > kind.maxHeight) {
+		|| parameters->width > limits->maxWidth
+		|| parameters->height > limits->maxHeight) {
 		reason->SetToFormat("%dx%d is outside what %s decodes",
 			parameters->width, parameters->height, kind.displayName);
 		return false;
@@ -208,9 +240,12 @@ stream_is_eligible(const HardwareDecoderKind& kind, AVStream* stream,
 	}
 	if (parameters->codec_id == AV_CODEC_ID_HEVC
 		&& parameters->profile != FF_PROFILE_UNKNOWN
-		&& parameters->profile != FF_PROFILE_HEVC_MAIN) {
-		reason->SetToFormat("%s decodes HEVC Main (8 bit) only",
-			kind.displayName);
+		&& parameters->profile != FF_PROFILE_HEVC_MAIN
+		&& !(parameters->profile == FF_PROFILE_HEVC_MAIN_10
+			&& limits->maxBitDepth >= 10)) {
+		reason->SetToFormat(limits->maxBitDepth >= 10
+			? "%s decodes HEVC Main and Main 10 only"
+			: "%s decodes HEVC Main (8 bit) only", kind.displayName);
 		return false;
 	}
 	return true;
@@ -258,13 +293,16 @@ public:
 		fWidth(0),
 		fHeight(0),
 		fRowBytes(0),
-		fFrameDuration(_FrameDuration())
+		fFrameDuration(_FrameDuration()),
+		fBufferPool(NULL),
+		fBufferSize(0)
 	{
 	}
 
 	~MediaKitVideoDecoder()
 	{
 		delete fDecoder;
+		av_buffer_pool_uninit(&fBufferPool);
 		av_packet_free(&fChunk);
 		av_packet_free(&fPending);
 	}
@@ -395,9 +433,26 @@ public:
 			picture->format = fPixelFormat;
 			picture->width = fWidth;
 			picture->height = fHeight;
-			// Rows exactly as wide as the add-on writes them.
-			if (av_frame_get_buffer(picture, 1) < 0)
+			// Rows exactly as wide as the add-on writes them, and for P010
+			// the chroma plane straight after the luma one, unpadded.
+			size_t lumaSize = fRowBytes * fHeight;
+			size_t size = fPixelFormat == AV_PIX_FMT_P010LE
+				? lumaSize * 3 / 2 : lumaSize;
+			if (fBufferPool == NULL || fBufferSize != size) {
+				av_buffer_pool_uninit(&fBufferPool);
+				fBufferPool = av_buffer_pool_init(size + 64, av_buffer_alloc);
+				fBufferSize = size;
+			}
+			picture->buf[0] = fBufferPool != NULL
+				? av_buffer_pool_get(fBufferPool) : NULL;
+			if (picture->buf[0] == NULL)
 				return B_NO_MEMORY;
+			picture->data[0] = picture->buf[0]->data;
+			picture->linesize[0] = (int)fRowBytes;
+			if (fPixelFormat == AV_PIX_FMT_P010LE) {
+				picture->data[1] = picture->data[0] + lumaSize;
+				picture->linesize[1] = (int)fRowBytes;
+			}
 			if (picture->linesize[0] != (int)fRowBytes) {
 				fprintf(stderr, "airTime: unexpected row length %d != %zu\n",
 					picture->linesize[0], fRowBytes);
@@ -436,6 +491,10 @@ public:
 				= fStream->codecpar->sample_aspect_ratio;
 			frame->frame->colorspace = fStream->codecpar->color_space;
 			frame->frame->color_range = fStream->codecpar->color_range;
+			frame->frame->color_trc = fStream->codecpar->color_trc;
+			frame->frame->color_primaries
+				= fStream->codecpar->color_primaries;
+			_AddLightLevels(frame->frame);
 			output = frame;
 			return B_OK;
 		}
@@ -533,12 +592,17 @@ private:
 		// Luma and chroma are cheaper for an add-on to hand over than
 		// pixels, and the conversion to pixels happens anyway while scaling
 		// to the window; ask for them first.
+		// Ten-bit pictures keep their depth, for the HDR tone mapping.
 		media_format format;
 		status_t status = B_ERROR;
-		static const color_space kSpaces[] = {B_YCbCr422, B_RGB32};
+		static const color_space kSpaces[] = {kColorSpaceP010, B_YCbCr422,
+			B_RGB32};
 		const char* forced = getenv("AIRTIME_HW_RGB");
+		bool tenBit = is_ten_bit(fStream->codecpar);
 		for (color_space space : kSpaces) {
 			if (space == B_YCbCr422 && forced != NULL)
+				continue;
+			if (space == kColorSpaceP010 && (!tenBit || forced != NULL))
 				continue;
 			format.Clear();
 			format.type = B_MEDIA_RAW_VIDEO;
@@ -568,6 +632,10 @@ private:
 					? AV_PIX_FMT_UYVY422 : AV_PIX_FMT_YUYV422;
 				break;
 			default:
+				if (display.format == kColorSpaceP010) {
+					fPixelFormat = AV_PIX_FMT_P010LE;
+					break;
+				}
 				fprintf(stderr, "airTime: %s offers colour space %#x\n",
 					fAddOn.kind->displayName, (unsigned)display.format);
 				return B_MEDIA_BAD_FORMAT;
@@ -584,6 +652,35 @@ private:
 		fDecoder->GetCodecInfo(&codecInfo);
 		fCodecName = codecInfo.short_name;
 		return B_OK;
+	}
+
+	/*!	The film's light levels, which the tone mapping reads from each
+		frame and libavcodec would have attached. */
+	void _AddLightLevels(AVFrame* frame)
+	{
+		const AVCodecParameters* parameters = fStream->codecpar;
+		const AVPacketSideData* light = av_packet_side_data_get(
+			parameters->coded_side_data, parameters->nb_coded_side_data,
+			AV_PKT_DATA_CONTENT_LIGHT_LEVEL);
+		if (light != NULL && light->size >= sizeof(AVContentLightMetadata)) {
+			AVFrameSideData* data = av_frame_new_side_data(frame,
+				AV_FRAME_DATA_CONTENT_LIGHT_LEVEL, sizeof(AVContentLightMetadata));
+			if (data != NULL)
+				memcpy(data->data, light->data, sizeof(AVContentLightMetadata));
+		}
+		const AVPacketSideData* mastering = av_packet_side_data_get(
+			parameters->coded_side_data, parameters->nb_coded_side_data,
+			AV_PKT_DATA_MASTERING_DISPLAY_METADATA);
+		if (mastering != NULL
+			&& mastering->size >= sizeof(AVMasteringDisplayMetadata)) {
+			AVFrameSideData* data = av_frame_new_side_data(frame,
+				AV_FRAME_DATA_MASTERING_DISPLAY_METADATA,
+				sizeof(AVMasteringDisplayMetadata));
+			if (data != NULL) {
+				memcpy(data->data, mastering->data,
+					sizeof(AVMasteringDisplayMetadata));
+			}
+		}
 	}
 
 	const LoadedAddOn&	fAddOn;
@@ -604,6 +701,10 @@ private:
 	AVPixelFormat		fPixelFormat;
 	bigtime_t			fFrameDuration;
 	BString				fCodecName;
+	// Frames are big (a 4K ten-bit one is 24 MB) and new memory is slow to
+	// fill the first time, so their buffers are used again.
+	AVBufferPool*		fBufferPool;
+	size_t				fBufferSize;
 };
 
 status_t
@@ -667,12 +768,14 @@ hardware_decoder_summary()
 			summary << ", ";
 		summary << addOn.kind->displayName << " (";
 		bool first = true;
-		for (AVCodecID codec : addOn.kind->codecs) {
-			if (codec == AV_CODEC_ID_NONE)
+		for (const CodecLimits& limits : addOn.kind->codecs) {
+			if (limits.codec == AV_CODEC_ID_NONE)
 				break;
 			if (!first)
 				summary << ", ";
-			summary << codec_display_name(codec);
+			summary << codec_display_name(limits.codec);
+			if (limits.maxBitDepth > 8)
+				summary << " up to " << limits.maxBitDepth << " bit";
 			first = false;
 		}
 		summary << ")";

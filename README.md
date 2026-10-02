@@ -18,7 +18,10 @@ it can.
   loads itself so that it can choose them and fall back to libavcodec when
   one refuses a stream:
   * **X399 workstation** — NVDEC on the GeForce card (the `nvdec` add-on):
-    8-bit 4:2:0 progressive H.264.
+    8-bit 4:2:0 progressive H.264, and HEVC Main and Main 10 up to 8K.
+    Ten-bit pictures come over as P010, so HDR films keep their depth for
+    the tone mapping; a 4K HDR10 film plays at 24 frames a second with about
+    14 ms of each frame's time spent decoding.
   * **ROCK 5 ITX** — the RK3588's own decoders through Rockchip MPP (the
     `00_rockchip_mpp` add-on): H.264 and HEVC on RKVDEC, AV1 on VPU981.
 

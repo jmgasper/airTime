@@ -33,6 +33,7 @@ Settings::Settings()
 	subtitleScale(1.0f),
 	loop(false),
 	hardwareDecoding(true),
+	noHardwareThisRun(false),
 	snapToAspect(true),
 	autoPlay(true),
 	timeDisplay(0),

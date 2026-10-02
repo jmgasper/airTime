@@ -163,7 +163,8 @@ PlayerWindow::PlayerWindow(BRect frame)
 	fWasPlayingBeforeEnd(false)
 {
 	fPlayer = new Player(BMessenger(this));
-	fPlayer->SetHardwareDecoding(settings().hardwareDecoding);
+	fPlayer->SetHardwareDecoding(settings().hardwareDecoding
+		&& !settings().noHardwareThisRun);
 	fPlayer->SetVolume(settings().volume);
 	fPlayer->SetMuted(settings().muted);
 	fPlayer->SetLooping(settings().loop);
@@ -585,7 +586,8 @@ PlayerWindow::_UpdateMenus()
 				menuItem->SetMarked(fAlwaysOnTop);
 				break;
 			case kMsgToggleHardware:
-				menuItem->SetMarked(settings().hardwareDecoding);
+				menuItem->SetMarked(settings().hardwareDecoding
+					&& !settings().noHardwareThisRun);
 				break;
 		}
 	}
@@ -1732,7 +1734,9 @@ PlayerWindow::MessageReceived(BMessage* message)
 				_SnapToAspect();
 			break;
 		case kMsgToggleHardware:
-			settings().hardwareDecoding = !settings().hardwareDecoding;
+			settings().hardwareDecoding = !settings().hardwareDecoding
+				|| settings().noHardwareThisRun;
+			settings().noHardwareThisRun = false;
 			fPlayer->SetHardwareDecoding(settings().hardwareDecoding);
 			_ShowMessage(settings().hardwareDecoding
 				? "Hardware decoding on" : "Hardware decoding off");
@@ -2086,12 +2090,14 @@ PlayerWindow::_HandleScripting(BMessage* message)
 		fVideo->Refresh();
 	} else if (name == "HardwareDecoding") {
 		if (get)
-			reply.AddBool("result", settings().hardwareDecoding);
+			reply.AddBool("result", settings().hardwareDecoding
+				&& !settings().noHardwareThisRun);
 		else {
 			bool enabled;
 			status = message->FindBool("data", &enabled);
 			if (status == B_OK) {
 				settings().hardwareDecoding = enabled;
+				settings().noHardwareThisRun = false;
 				fPlayer->SetHardwareDecoding(enabled);
 			}
 		}
