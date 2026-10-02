@@ -158,6 +158,8 @@ private:
 			void				_DemuxLoop();
 			void				_VideoDecodeLoop();
 			void				_PresentLoop();
+			void				_SubtitlePrerollLoop();
+			void				_RequestSubtitlePreroll(bigtime_t time);
 
 			void				_PerformSeek();
 			void				_RouteVideoPacket(AVPacket* packet);
@@ -232,7 +234,15 @@ private:
 			std::thread			fVideoThread;
 			std::thread			fAudioThread;
 			std::thread			fPresentThread;
+			std::thread			fPrerollThread;
 			std::atomic<bool>	fQuit;
+
+			// Subtitles that began before a seek target are read again by a
+			// reader of their own, from a little before it.
+			std::mutex			fPrerollLock;
+			std::condition_variable	fPrerollWake;
+			bigtime_t			fPrerollTarget;
+			bool				fPrerollRequested;
 
 			// State, under fLock
 			std::mutex			fLock;
@@ -247,6 +257,10 @@ private:
 			int					fSeekDirection;	// keyframe seeks: 1 or -1
 			bigtime_t			fPendingPosition;	// until the seek shows
 			bool				fPositionPending;
+			// The queue serials when the last seek was asked for: pictures
+			// and sound from them or before belong to the old position.
+			int					fSeekFromVideoSerial;
+			int					fSeekFromAudioSerial;
 			bool				fShowNextFrame;
 			bool				fEndOfFile;
 			bool				fEnded;

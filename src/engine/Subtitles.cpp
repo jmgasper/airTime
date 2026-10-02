@@ -415,7 +415,10 @@ add_subtitle(SubtitleTrack* track, const AVSubtitle& subtitle,
 	bigtime_t packetPts, bigtime_t packetDuration, bigtime_t startTime,
 	int canvasWidth, int canvasHeight, bool textCodec, bool caption = false)
 {
-	bigtime_t base = subtitle.pts != AV_NOPTS_VALUE
+	// libavcodec's caption decoder, in real time mode, stamps a change of
+	// the screen with the time of the change before it; the packet that made
+	// the change has the right time.
+	bigtime_t base = subtitle.pts != AV_NOPTS_VALUE && !caption
 		? subtitle.pts : packetPts;
 	if (base == AV_NOPTS_VALUE || base == kNoTime)
 		return;

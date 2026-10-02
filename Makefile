@@ -68,7 +68,16 @@ $(HOST_BUILD)/engine_tests: $(TEST_SRC) $(wildcard tests/host/*.h) $(wildcard sr
 	$(HOST_CXX) -std=c++17 -O1 -g -Wall -Wno-multichar -Itests/host -Isrc/engine \
 		$(HOST_FFMPEG_CFLAGS) -o $@ $(TEST_SRC) $(HOST_FFMPEG_LIBS) -pthread
 
-check-host: $(HOST_BUILD)/engine_tests
+$(HOST_BUILD)/caption_dump: tests/CaptionDump.cpp src/engine/Subtitles.cpp \
+		src/engine/Bitstream.cpp src/engine/Tracks.cpp src/engine/Languages.cpp
+	@mkdir -p $(HOST_BUILD)
+	$(HOST_CXX) -std=c++17 -O1 -g -Itests/host -Isrc/engine $(HOST_FFMPEG_CFLAGS) \
+		-o $@ $^ $(HOST_FFMPEG_LIBS) -pthread
+
+AIRTIME_TEST_MEDIA ?= $(wildcard /mnt/HaikuWork/artifacts/airtime-media)
+export AIRTIME_TEST_MEDIA
+
+check-host: $(HOST_BUILD)/engine_tests $(HOST_BUILD)/caption_dump
 	$(HOST_BUILD)/engine_tests
 
 check: check-host

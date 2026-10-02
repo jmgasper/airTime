@@ -120,6 +120,8 @@ Player::Player(const BMessenger& target)
 	fAudioDecoder(NULL),
 	fAudioOutput(NULL),
 	fQuit(false),
+	fPrerollTarget(0),
+	fPrerollRequested(false),
 	fPlaying(false),
 	fRate(1.0),
 	fScanning(false),
@@ -130,6 +132,8 @@ Player::Player(const BMessenger& target)
 	fSeekDirection(0),
 	fPendingPosition(0),
 	fPositionPending(false),
+	fSeekFromVideoSerial(-1),
+	fSeekFromAudioSerial(-1),
 	fShowNextFrame(false),
 	fEndOfFile(false),
 	fEnded(false),
@@ -414,6 +418,13 @@ Player::_StartThreads()
 		fVideoThread = std::thread(&Player::_VideoDecodeLoop, this);
 	_StartAudioThread();
 	fPresentThread = std::thread(&Player::_PresentLoop, this);
+	bool embedded = false;
+	for (const SubtitleSource& source : fSubtitles) {
+		if (source.decoder != NULL)
+			embedded = true;
+	}
+	if (embedded)
+		fPrerollThread = std::thread(&Player::_SubtitlePrerollLoop, this);
 }
 
 
@@ -438,6 +449,12 @@ Player::_StopThreads()
 		fAudioThread.join();
 	if (fPresentThread.joinable())
 		fPresentThread.join();
+	{
+		std::lock_guard<std::mutex> lock(fPrerollLock);
+		fPrerollWake.notify_all();
+	}
+	if (fPrerollThread.joinable())
+		fPrerollThread.join();
 }
 
 
@@ -640,6 +657,8 @@ Player::_RequestSeekLocked(bigtime_t time, bool accurate, int direction)
 	fSeekDirection = direction;
 	fPendingPosition = time;
 	fPositionPending = true;
+	fSeekFromVideoSerial = fVideoQueue.Serial();
+	fSeekFromAudioSerial = fAudioQueue.Serial();
 	fWakeUp.notify_all();
 }
 
@@ -862,6 +881,8 @@ Player::SelectSubtitleTrack(int index)
 			return;
 		fSubtitleSelected = index < 0 ? -1 : index;
 	}
+	if (index >= 0)
+		_RequestSubtitlePreroll(Position());
 	_Notify(kMsgPlayerTracksChanged);
 }
 
@@ -1318,6 +1339,8 @@ Player::_PerformSeek()
 		if (source.decoder != NULL)
 			source.decoder->Flush();
 	}
+	if (accurate)
+		_RequestSubtitlePreroll(target);
 
 	std::lock_guard<std::mutex> lock(fLock);
 	fWakeUp.notify_all();
@@ -1810,9 +1833,12 @@ Player::_PresentLoop()
 				continue;
 			}
 			std::unique_lock<std::mutex> lock(fLock);
-			if (fPositionPending && fAudioClock.Serial() == fAudioQueue.Serial())
+			if (fPositionPending && !fSeekRequested
+				&& fAudioClock.Serial() == fAudioQueue.Serial()
+				&& fAudioQueue.Serial() > fSeekFromAudioSerial)
 				fPositionPending = false;
 			if (fPositionPending && !fPlaying && !fSeekRequested
+				&& fAudioQueue.Serial() > fSeekFromAudioSerial
 				&& system_time() - fSerialStarted > 200000) {
 				// Paused: nothing will be heard to confirm the seek.
 				fPositionPending = false;
@@ -1834,6 +1860,19 @@ Player::_PresentLoop()
 		int serial = fVideoQueue.Serial();
 		if (frame->serial != serial) {
 			fFrames.Pop();
+			continue;
+		}
+		bool beforeSeek;
+		{
+			std::lock_guard<std::mutex> lock(fLock);
+			beforeSeek = fPositionPending && !fScanning
+				&& frame->serial <= fSeekFromVideoSerial;
+		}
+		if (beforeSeek) {
+			// The reader has not got to the seek yet; what is queued is from
+			// the old position. Wait for the new pictures rather than show it.
+			std::unique_lock<std::mutex> lock(fLock);
+			fWakeUp.wait_for(lock, std::chrono::milliseconds(5));
 			continue;
 		}
 
@@ -1936,6 +1975,123 @@ Player::_PresentLoop()
 			snooze(2000);
 		}
 	}
+}
+
+
+void
+Player::_RequestSubtitlePreroll(bigtime_t time)
+{
+	std::lock_guard<std::mutex> lock(fPrerollLock);
+	fPrerollTarget = time;
+	fPrerollRequested = true;
+	fPrerollWake.notify_all();
+}
+
+
+void
+Player::_SubtitlePrerollLoop()
+{
+	rename_thread(find_thread(NULL), "airTime subtitle preroll");
+	static const bigtime_t kPreroll = 10000000;
+
+	AVFormatContext* format = NULL;
+	std::vector<SubtitleDecoder*> decoders;
+	AVPacket* packet = av_packet_alloc();
+
+	while (!fQuit) {
+		bigtime_t target;
+		{
+			std::unique_lock<std::mutex> lock(fPrerollLock);
+			while (!fPrerollRequested && !fQuit)
+				fPrerollWake.wait_for(lock, std::chrono::milliseconds(200));
+			if (fQuit)
+				break;
+			target = fPrerollTarget;
+			fPrerollRequested = false;
+		}
+
+		// Only the track on screen is worth the reading.
+		int stream = -1;
+		SubtitleTrack* track = NULL;
+		AVCodecParameters* parameters = NULL;
+		AVRational timeBase;
+		size_t sourceIndex = 0;
+		{
+			std::lock_guard<std::mutex> lock(fLock);
+			if (fSubtitleSelected >= 0
+				&& fSubtitleSelected < (int)fSubtitles.size()
+				&& fSubtitles[fSubtitleSelected].decoder != NULL) {
+				sourceIndex = fSubtitleSelected;
+				stream = fSubtitles[sourceIndex].info.stream;
+				track = fSubtitles[sourceIndex].track;
+			}
+		}
+		if (stream < 0 || target <= 0)
+			continue;
+
+		if (format == NULL) {
+			if (avformat_open_input(&format, fPath.String(), NULL, NULL) < 0) {
+				format = NULL;
+				break;
+			}
+			avformat_find_stream_info(format, NULL);
+			decoders.resize(format->nb_streams, NULL);
+		}
+		if (stream >= (int)format->nb_streams)
+			continue;
+		// Every stream is read, so the reading can stop once anything is
+		// past the target; a sparse subtitle track alone could keep it
+		// reading for minutes.
+		parameters = format->streams[stream]->codecpar;
+		timeBase = format->streams[stream]->time_base;
+		if (decoders[stream] == NULL) {
+			decoders[stream] = new SubtitleDecoder(parameters, timeBase,
+				fStartTime, track);
+			BString reason;
+			if (decoders[stream]->Init(&reason) != B_OK) {
+				delete decoders[stream];
+				decoders[stream] = NULL;
+				continue;
+			}
+			decoders[stream]->SetVideoSize(fVideoWidth, fVideoHeight);
+		}
+		SubtitleDecoder* decoder = decoders[stream];
+		decoder->Flush();
+
+		int64 from = std::max((bigtime_t)0, target - kPreroll) + fStartTime;
+		if (avformat_seek_file(format, -1, INT64_MIN, from, from, 0) < 0)
+			continue;
+		bigtime_t until = target + fStartTime + 1000000;
+		int read = 0;
+		while (!fQuit && av_read_frame(format, packet) >= 0) {
+			if (packet->stream_index == stream)
+				decoder->Decode(packet);
+			int64 timestamp = packet->dts != AV_NOPTS_VALUE ? packet->dts
+				: packet->pts;
+			bool past = timestamp != AV_NOPTS_VALUE
+				&& packet->stream_index < (int)format->nb_streams
+				&& to_micros(timestamp,
+					format->streams[packet->stream_index]->time_base) > until;
+			av_packet_unref(packet);
+			// Another seek asked for meanwhile: start over there.
+			bool again;
+			{
+				std::lock_guard<std::mutex> lock(fPrerollLock);
+				again = fPrerollRequested;
+			}
+			if (past || again || ++read > 20000)
+				break;
+		}
+		TRACE("airTime: subtitle preroll to %.3f, %d packets, %d events\n",
+			target / 1e6, read, track->Count());
+		_Notify(kMsgPlayerTracksChanged);
+	}
+
+	for (SubtitleDecoder* decoder : decoders)
+		delete decoder;
+	av_packet_free(&packet);
+	if (format != NULL)
+		avformat_close_input(&format);
 }
 
 
