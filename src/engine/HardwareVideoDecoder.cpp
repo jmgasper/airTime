@@ -55,9 +55,9 @@ const HardwareDecoderKind kKinds[] = {
 	// The NVDEC add-on of this fork: eight bit 4:2:0 progressive H.264, and
 	// HEVC Main and Main 10 (which the add-on does not offer the Media Kit:
 	// it is only asked here, where a refusal falls back to libavcodec).
-	// With 16 reference frames its H.264 picture store is one short and
-	// only the first pictures come out (see the add-on's notes), so those
-	// streams go to libavcodec.
+	// Before it called itself "nvdec h264 2", its H.264 picture store was one
+	// short with 16 reference frames and only the first pictures came out,
+	// so with an older one those streams go to libavcodec.
 	{"nvdec", "NVDEC", {{AV_CODEC_ID_H264, 4096, 4096, 8},
 		{AV_CODEC_ID_HEVC, 8192, 8192, 10}, {AV_CODEC_ID_NONE, 0, 0, 0}},
 		15, true},
@@ -78,7 +78,26 @@ struct LoadedAddOn {
 	BString						path;
 	image_id					image;
 	DecoderPlugin*				plugin;
+	int							maxReferenceFrames;
 };
+
+
+/*!	The NVDEC add-on says by its name whether it holds 16 reference frames. */
+int
+max_reference_frames(const HardwareDecoderKind& kind, DecoderPlugin* plugin)
+{
+	if (kind.maxReferenceFrames == 0 || strcmp(kind.leafName, "nvdec") != 0)
+		return kind.maxReferenceFrames;
+	Decoder* decoder = plugin->NewDecoder(0);
+	if (decoder == NULL)
+		return kind.maxReferenceFrames;
+	media_codec_info info;
+	memset(&info, 0, sizeof(info));
+	decoder->GetCodecInfo(&info);
+	delete decoder;
+	return strcmp(info.short_name, "nvdec h264") == 0
+		? kind.maxReferenceFrames : 0;
+}
 
 
 std::mutex sAddOnLock;
@@ -133,7 +152,7 @@ scan_add_ons()
 				continue;
 			}
 			sAddOns.push_back(LoadedAddOn{&kind, path.Path(), image,
-				decoderPlugin});
+				decoderPlugin, max_reference_frames(kind, decoderPlugin)});
 			// The first directory wins, as in the Media Kit.
 			break;
 		}
@@ -174,9 +193,10 @@ is_ten_bit(const AVCodecParameters* parameters)
 /*!	The stream properties every add-on here needs: 4:2:0 of a depth the
 	engine decodes, no fields, no larger than the engine. */
 bool
-stream_is_eligible(const HardwareDecoderKind& kind, AVStream* stream,
+stream_is_eligible(const LoadedAddOn& addOn, AVStream* stream,
 	BString* reason)
 {
+	const HardwareDecoderKind& kind = *addOn.kind;
 	AVCodecParameters* parameters = stream->codecpar;
 	const CodecLimits* limits = limits_for(kind, parameters->codec_id);
 	if (limits == NULL) {
@@ -224,7 +244,7 @@ stream_is_eligible(const HardwareDecoderKind& kind, AVStream* stream,
 					"does not decode", kind.displayName);
 				return false;
 			}
-			int maxReferences = kind.maxReferenceFrames;
+			int maxReferences = addOn.maxReferenceFrames;
 			const char* override = getenv("AIRTIME_NVDEC_MAX_REFERENCES");
 			if (override != NULL && strcmp(kind.leafName, "nvdec") == 0)
 				maxReferences = atoi(override);
@@ -728,7 +748,7 @@ create_hardware_decoder(AVStream* stream, PacketQueue* queue,
 	for (const LoadedAddOn& addOn : sAddOns) {
 		if (!kind_handles_codec(*addOn.kind, stream->codecpar->codec_id))
 			continue;
-		if (!stream_is_eligible(*addOn.kind, stream, reason))
+		if (!stream_is_eligible(addOn, stream, reason))
 			continue;
 		MediaKitVideoDecoder* decoder = new(std::nothrow) MediaKitVideoDecoder(
 			addOn, stream, queue, startTime);
