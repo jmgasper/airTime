@@ -38,6 +38,10 @@ public:
 			void				SetSpeed(double speed);
 			// Samples of the serial before the time are dropped.
 			void				SetTrim(int serial, bigtime_t time);
+			// Whether the first packets it gets are those from the
+			// beginning of the file (true until set otherwise).
+			void				SetStartsAtBeginning(bool atBeginning)
+									{ fStartsAtBeginning = atBeginning; }
 			// The stream has ended for the serial and everything was handed
 			// to the output.
 			bool				Finished(int serial) const;
@@ -52,6 +56,8 @@ private:
 			void				_FreeTempo();
 			void				_Output(const float* samples, int frames,
 									bigtime_t pts);
+			void				_OutputSilence(bigtime_t from,
+									bigtime_t until);
 			bool				_KeepWaiting();
 
 			AVStream*			fStream;
@@ -69,6 +75,8 @@ private:
 			AVChannelLayout		fResamplerLayout;
 			std::vector<float>	fConverted;
 			bigtime_t			fNextPts;
+			bigtime_t			fGapStart;
+			bool				fStartsAtBeginning;
 
 			AVFilterGraph*		fTempoGraph;
 			AVFilterContext*	fTempoSource;

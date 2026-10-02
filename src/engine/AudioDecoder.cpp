@@ -6,6 +6,8 @@
 
 #include "AudioDecoder.h"
 
+#include <algorithm>
+
 #include <math.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -16,6 +18,13 @@ namespace airtime {
 
 static bool sTrace = getenv("AIRTIME_TRACE") != NULL;
 #define TRACE(...) do { if (sTrace) fprintf(stderr, __VA_ARGS__); } while (0)
+
+// Holes in the audio longer than this are filled with silence, so that the
+// clock, which the picture follows, keeps running through them: a track that
+// starts after the picture would otherwise skip the picture ahead to where
+// the sound begins.
+static const bigtime_t kMinimumGap = 20000;
+static const bigtime_t kMaximumGap = 10000000;
 
 
 AudioDecoder::AudioDecoder(AVStream* stream, PacketQueue* queue,
@@ -33,6 +42,8 @@ AudioDecoder::AudioDecoder(AVStream* stream, PacketQueue* queue,
 	fResamplerRate(0),
 	fResamplerFormat(-1),
 	fNextPts(kNoTime),
+	fGapStart(kNoTime),
+	fStartsAtBeginning(true),
 	fTempoGraph(NULL),
 	fTempoSource(NULL),
 	fTempoSink(NULL),
@@ -159,6 +170,14 @@ AudioDecoder::Run()
 
 		if (serial != fSerial) {
 			_Reset();
+			// Sound is expected from where playback starts: the beginning
+			// when the file was just opened, or the target of an accurate
+			// seek. After any other seek it starts wherever it starts.
+			std::lock_guard<std::mutex> lock(fStateLock);
+			if (fTrimSerial == serial && fTrimTime != INT64_MIN)
+				fGapStart = fTrimTime;
+			else
+				fGapStart = fSerial < 0 && fStartsAtBeginning ? 0 : kNoTime;
 			fSerial = serial;
 			draining = false;
 		}
@@ -253,7 +272,16 @@ AudioDecoder::_HandleFrame(AVFrame* frame)
 		pts = 0;
 	bigtime_t frameDuration = (bigtime_t)frame->nb_samples * 1000000
 		/ frame->sample_rate;
+	bigtime_t expected = fNextPts != kNoTime ? fNextPts : fGapStart;
 	fNextPts = pts + frameDuration;
+	if (expected != kNoTime && pts - expected > kMinimumGap
+		&& pts - expected <= kMaximumGap) {
+		TRACE("airTime: %.3f s without sound at %.3f\n",
+			(pts - expected) / 1e6, expected / 1e6);
+		_OutputSilence(expected, pts);
+		if (!_KeepWaiting())
+			return;
+	}
 
 	// An accurate seek: drop what lies before the target.
 	int skip = 0;
@@ -290,6 +318,21 @@ AudioDecoder::_HandleFrame(AVFrame* frame)
 		outputPts += (bigtime_t)skipOut * 1000000 / fOutput->SampleRate();
 	}
 	_Output(samples, converted, outputPts);
+}
+
+
+void
+AudioDecoder::_OutputSilence(bigtime_t from, bigtime_t until)
+{
+	int rate = fOutput->SampleRate();
+	int channels = fOutput->Channels();
+	const int chunk = rate / 10;
+	std::vector<float> silence((size_t)chunk * channels, 0.0f);
+	int64 total = (until - from) * rate / 1000000;
+	for (int64 done = 0; done < total && _KeepWaiting(); done += chunk) {
+		int frames = (int)std::min((int64)chunk, total - done);
+		_Output(silence.data(), frames, from + done * 1000000 / rate);
+	}
 }
 
 

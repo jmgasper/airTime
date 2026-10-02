@@ -834,6 +834,7 @@ Player::SelectAudioTrack(int index)
 			AVStream* newStream = fFormat->streams[stream];
 			fAudioDecoder = new AudioDecoder(newStream, &fAudioQueue,
 				fAudioOutput, fStartTime);
+			fAudioDecoder->SetStartsAtBeginning(false);
 			BString reason;
 			if (fAudioDecoder->Init(&reason) != B_OK) {
 				delete fAudioDecoder;
