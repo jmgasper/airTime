@@ -29,6 +29,8 @@ done
 	echo "mv -f .$NAME.new $NAME"
 	echo "rm ${PARTS[*]}"
 	echo "test \"\$(sha256sum $NAME | cut -d' ' -f1)\" = $SUM && echo uploaded $NAME"
+	# As in r5-hey.sh: the login shell would otherwise keep its PTY.
+	echo '(sleep 5; kill -9 $$) > /dev/null 2>&1 &'
 } > "$WORKDIR/join.cmd"
 ( cd /mnt/HaikuWork/src/haiku && timeout 300 "$PY" "$LAB/shell.py" run 10.239.6.100 \
 	"$WORKDIR/join.cmd" --output "$WORKDIR/join.txt" >/dev/null 2>&1 ) || true

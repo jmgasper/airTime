@@ -40,6 +40,10 @@ APP=${AIRTIME_APP:-/boot/system/apps/airTime}
 				;;
 		esac
 	done
+	# The lab shell's login shells outlive their sessions and hold a
+	# pseudo-terminal each; once the board's 64 are gone no one can log in.
+	# Each script ends its own shortly after it has answered.
+	echo '(sleep 5; kill -9 $$) > /dev/null 2>&1 &'
 	echo "true"
 } > "$SCRIPT"
 ( cd /mnt/HaikuWork/src/haiku && timeout 600 "$PY" "$LAB/shell.py" run 10.239.6.100 \
