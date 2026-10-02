@@ -22,6 +22,7 @@ VideoDecoder::VideoDecoder(AVStream* stream, PacketQueue* queue,
 	fSerial(-1),
 	fSkipBefore(0),
 	fKeyframesOnly(false),
+	fHurry(0),
 	fPacketsWithoutFrame(0)
 {
 }
@@ -69,7 +70,8 @@ SoftwareVideoDecoder::SoftwareVideoDecoder(AVStream* stream,
 	fPacketPending(false),
 	fDraining(false),
 	fFinished(false),
-	fKeyframesOnlyApplied(false)
+	fKeyframesOnlyApplied(false),
+	fHurryApplied(0)
 {
 }
 
@@ -134,10 +136,21 @@ SoftwareVideoDecoder::Name() const
 status_t
 SoftwareVideoDecoder::Decode(VideoFramePtr& output)
 {
-	if (fKeyframesOnly != fKeyframesOnlyApplied) {
+	if (fKeyframesOnly != fKeyframesOnlyApplied || fHurry != fHurryApplied) {
 		fKeyframesOnlyApplied = fKeyframesOnly;
-		fContext->skip_frame = fKeyframesOnlyApplied
-			? AVDISCARD_NONKEY : AVDISCARD_DEFAULT;
+		fHurryApplied = fHurry;
+		AVDiscard skipFrame = AVDISCARD_DEFAULT;
+		AVDiscard skipFilter = AVDISCARD_DEFAULT;
+		if (fKeyframesOnlyApplied || fHurryApplied >= 4)
+			skipFrame = AVDISCARD_NONKEY;
+		else if (fHurryApplied >= 2)
+			skipFrame = AVDISCARD_NONREF;
+		if (fHurryApplied >= 3)
+			skipFilter = AVDISCARD_ALL;
+		else if (fHurryApplied >= 1)
+			skipFilter = AVDISCARD_NONREF;
+		fContext->skip_frame = skipFrame;
+		fContext->skip_loop_filter = skipFilter;
 	}
 
 	for (;;) {

@@ -37,6 +37,15 @@
 #include "VideoView.h"
 
 
+// Stay connected to the frame buffer on a desktop drawn at a higher density,
+// placed in its pixels (air/OS's app_server; older ones drop the flag).
+#ifdef B_DIRECT_DEVICE_PIXELS
+static const uint32 kDirectDevicePixels = B_DIRECT_DEVICE_PIXELS;
+#else
+static const uint32 kDirectDevicePixels = 0x00000400;
+#endif
+
+
 namespace airtime {
 
 static const float kBorder = 8;
@@ -138,7 +147,7 @@ static property_info sProperties[] = {
 PlayerWindow::PlayerWindow(BRect frame)
 	:
 	BDirectWindow(frame, "airTime", B_TITLED_WINDOW_LOOK, B_NORMAL_WINDOW_FEEL,
-		B_ASYNCHRONOUS_CONTROLS),
+		B_ASYNCHRONOUS_CONTROLS | kDirectDevicePixels),
 	fPlayer(NULL),
 	fHasFile(false),
 	fSeekOnOpen(-1),
@@ -2036,7 +2045,8 @@ PlayerWindow::_HandleScripting(BMessage* message)
 			"shown=%" B_PRId64 " dropped=%" B_PRId64 " fps=%.1f "
 			"av=%.1fms audiobuf=%.0fms vq=%d aq=%d fq=%d "
 			"decode=%.1fms compose=%.1fms draw=%.1fms phases=%d/%d/%d "
-			"scanseeks=%d scanshown=%.3f awaiting=%d direct=%d hud=%d",
+			"scanseeks=%d scanshown=%.3f awaiting=%d direct=%d hud=%d "
+			"hurry=%d late=%.0fms",
 			fPlayer->Position() / 1e6, fPlayer->Rate(), fPlayer->IsPlaying(),
 			fPlayer->IsScanning(), stats.framesShown, stats.framesDropped,
 			stats.displayRate, stats.avOffset / 1000.0,
@@ -2045,7 +2055,8 @@ PlayerWindow::_HandleScripting(BMessage* message)
 			stats.composeTime / 1000.0, stats.drawTime / 1000.0,
 			stats.demuxPhase, stats.decodePhase, stats.presentPhase,
 			stats.scanSeeks, stats.scanShown / 1e6, stats.scanAwaiting,
-			fVideo->DrawsDirectly(), fHudShown);
+			fVideo->DrawsDirectly(), fHudShown, stats.hurry,
+			stats.lateness / 1000.0);
 		reply.AddString("result", text);
 	} else if (name == "Tracks") {
 		BString text;

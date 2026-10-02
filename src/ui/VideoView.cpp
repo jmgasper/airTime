@@ -43,7 +43,12 @@ VideoView::VideoView(BRect frame, const BMessenger& target)
 	fDirectUsed(false),
 	fCovered(false),
 	fDirectBits(NULL),
-	fDirectBytesPerRow(0)
+	fDirectBytesPerRow(0),
+	fDirectScale(1.0f),
+	fDrawingSource(-1),
+	fDrawingClone(-1),
+	fDrawingBits(NULL),
+	fDrawingBytesPerRow(0)
 {
 	fBitmaps[0] = NULL;
 	fBitmaps[1] = NULL;
@@ -57,6 +62,8 @@ VideoView::~VideoView()
 {
 	delete fBitmaps[0];
 	delete fBitmaps[1];
+	if (fDrawingClone >= 0)
+		delete_area(fDrawingClone);
 }
 
 
@@ -261,6 +268,14 @@ VideoView::DisplayFrame(const VideoFramePtr& frame)
 	if (width < 2 || height < 2)
 		return true;
 
+	// Drawn into the frame buffer at a higher density, the picture is made
+	// at that density: a film keeps the detail the screen can show.
+	float scale = _DirectScale();
+	if (scale != 1.0f) {
+		int left, top;
+		_DeviceRect(rect, BPoint(0, 0), scale, &left, &top, &width, &height);
+	}
+
 	std::lock_guard<std::mutex> render(fRenderLock);
 	int next = fCurrent ^ 1;
 	bigtime_t start = system_time();
@@ -281,7 +296,7 @@ VideoView::DisplayFrame(const VideoFramePtr& frame)
 		return false;
 	bigtime_t locked = system_time();
 	BRect now = VideoFrame();
-	if (now == rect)
+	if (now == rect && scale == 1.0f)
 		DrawBitmap(fBitmaps[next], rect.LeftTop());
 	else {
 		// Resized while this one was made: stretch it, the next fits.
@@ -307,23 +322,57 @@ VideoView::DirectConnected(direct_buffer_info* info)
 		{
 			if (getenv("AIRTIME_TRACE") != NULL) {
 				fprintf(stderr, "airTime: direct %s, %d bpp, format %#x, "
-					"%" B_PRIu32 " clips, bits %p\n",
+					"%" B_PRIu32 " clips, bits %p, %" B_PRId32 " bytes a row, "
+					"window (%" B_PRId32 ",%" B_PRId32 ")-(%" B_PRId32 ",%"
+					B_PRId32 "), scale %" B_PRIu32 ", copy area %" B_PRId32
+					" with %" B_PRId32 " bytes a row\n",
 					(info->buffer_state & B_DIRECT_MODE_MASK) == B_DIRECT_START
 						? "start" : "modify", (int)info->bits_per_pixel,
 					(unsigned)info->pixel_format, info->clip_list_count,
-					info->bits);
+					info->bits, (int32)info->bytes_per_row,
+					info->window_bounds.left, info->window_bounds.top,
+					info->window_bounds.right, info->window_bounds.bottom,
+					(uint32)info->_reserved1[0], (int32)info->_reserved1[1],
+					(int32)info->_reserved1[2]);
 			}
 			bool usable = info->bits != NULL && info->bits_per_pixel == 32
 				&& (info->pixel_format == B_RGB32
 					|| info->pixel_format == B_RGBA32)
 				&& info->layout == B_BUFFER_NONINTERLEAVED
 				&& info->orientation == B_BUFFER_TOP_TO_BOTTOM;
-			fDirectConnected = usable;
 			fDirectBits = (uint8*)info->bits;
 			fDirectBytesPerRow = info->bytes_per_row;
 			fDirectWindowBounds = info->window_bounds;
 			fDirectClips.assign(info->clip_list,
 				info->clip_list + info->clip_list_count);
+
+			// The fields an app_server that keeps direct windows connected
+			// at a higher density adds, in what used to be reserved: the
+			// density and its copy of the screen. Zero from any other.
+			// The density is in percent.
+			uint32 percent = info->_reserved1[0];
+			area_id drawing = (area_id)info->_reserved1[1];
+			fDirectScale = percent > 100 && percent <= 400
+				? percent / 100.0f : 1.0f;
+			if (fDirectScale != 1.0f) {
+				if (drawing != fDrawingSource) {
+					if (fDrawingClone >= 0)
+						delete_area(fDrawingClone);
+					void* bits = NULL;
+					fDrawingClone = drawing >= 0
+						? clone_area("airTime screen copy", &bits,
+							B_ANY_ADDRESS, B_READ_AREA | B_WRITE_AREA, drawing)
+						: -1;
+					fDrawingSource = drawing;
+					fDrawingBits = fDrawingClone >= 0 ? (uint8*)bits : NULL;
+				}
+				fDrawingBytesPerRow = (int32)info->_reserved1[2];
+				// Without the copy, what is drawn would be erased by the
+				// next copy to the screen.
+				if (fDrawingBits == NULL)
+					usable = false;
+			}
+			fDirectConnected = usable;
 			break;
 		}
 		case B_DIRECT_STOP:
@@ -334,6 +383,31 @@ VideoView::DirectConnected(direct_buffer_info* info)
 			fDirectClips.clear();
 			break;
 	}
+}
+
+
+float
+VideoView::_DirectScale()
+{
+	if (!fDirectAllowed)
+		return 1.0f;
+	std::lock_guard<std::mutex> lock(fDirectLock);
+	if (!fDirectConnected || fCovered || fDirectBits == NULL)
+		return 1.0f;
+	return fDirectScale;
+}
+
+
+/*!	A rectangle of the view in frame buffer pixels: each edge rounded to the
+	nearest, so that rectangles side by side stay side by side. */
+/*static*/ void
+VideoView::_DeviceRect(BRect rect, BPoint origin, float scale, int* left,
+	int* top, int* width, int* height)
+{
+	*left = (int)roundf((origin.x + rect.left) * scale);
+	*top = (int)roundf((origin.y + rect.top) * scale);
+	*width = (int)roundf((origin.x + rect.right + 1) * scale) - *left;
+	*height = (int)roundf((origin.y + rect.bottom + 1) * scale) - *top;
 }
 
 
@@ -368,13 +442,21 @@ VideoView::_DrawDirect(BBitmap* bitmap, BRect rect)
 		return false;
 	}
 
-	// The picture's place on the screen.
-	int left = fDirectWindowBounds.left + (int)(fWindowOrigin.x + rect.left);
-	int top = fDirectWindowBounds.top + (int)(fWindowOrigin.y + rect.top);
-	int width = rect.IntegerWidth() + 1;
-	int height = rect.IntegerHeight() + 1;
+	// The picture's place on the screen, in frame buffer pixels. A picture
+	// made before the density changed does not fit; the next one will.
+	float scale = fDirectScale;
+	int left, top, width, height;
+	_DeviceRect(rect, fWindowOrigin, scale, &left, &top, &width, &height);
+	left += fDirectWindowBounds.left;
+	top += fDirectWindowBounds.top;
+	if (bitmap->Bounds().IntegerWidth() + 1 != width
+		|| bitmap->Bounds().IntegerHeight() + 1 != height) {
+		fDirectUsed = false;
+		return false;
+	}
 	const uint8* source = (const uint8*)bitmap->Bits();
 	int32 sourceStride = bitmap->BytesPerRow();
+	uint8* copy = scale != 1.0f ? fDrawingBits : NULL;
 
 	for (const clipping_rect& clip : fDirectClips) {
 		int x0 = std::max(left, (int)clip.left);
@@ -385,9 +467,14 @@ VideoView::_DrawDirect(BBitmap* bitmap, BRect rect)
 			continue;
 		size_t bytes = (size_t)(x1 - x0 + 1) * 4;
 		for (int y = y0; y <= y1; y++) {
+			const uint8* from = source + (size_t)(y - top) * sourceStride
+				+ (x0 - left) * 4;
 			memcpy(fDirectBits + (size_t)y * fDirectBytesPerRow + x0 * 4,
-				source + (size_t)(y - top) * sourceStride + (x0 - left) * 4,
-				bytes);
+				from, bytes);
+			if (copy != NULL) {
+				memcpy(copy + (size_t)y * fDrawingBytesPerRow + x0 * 4, from,
+					bytes);
+			}
 		}
 	}
 	fDirectUsed = true;

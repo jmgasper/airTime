@@ -48,6 +48,12 @@ public:
 			// Only key frames are wanted (fast forward and rewind).
 			void				SetKeyframesOnly(bool only)
 									{ fKeyframesOnly = only; }
+			// How much work to leave out to keep up, when pictures come out
+			// later than they should be shown: 0 none, 1 no deblocking of
+			// pictures nothing refers to, 2 no such pictures at all, 3 no
+			// deblocking at all, 4 key frames only. Decoders that cannot
+			// leave anything out ignore it.
+			void				SetHurry(int level) { fHurry = level; }
 
 			// How many packets went in without a picture coming out; a
 			// hardware decoder that only swallows packets is replaced.
@@ -64,6 +70,7 @@ protected:
 			int					fSerial;
 			std::atomic<bigtime_t> fSkipBefore;
 			std::atomic<bool>	fKeyframesOnly;
+			std::atomic<int>	fHurry;
 			int					fPacketsWithoutFrame;
 };
 
@@ -88,6 +95,7 @@ private:
 			bool				fDraining;
 			bool				fFinished;
 			bool				fKeyframesOnlyApplied;
+			int					fHurryApplied;
 };
 
 

@@ -162,6 +162,11 @@ Player::Player(const BMessenger& target)
 	fDisplayRate(0),
 	fLastAVOffset(0),
 	fDecodeTime(0),
+	fLateness(0),
+	fHurry(0),
+	fHurryChanged(0),
+	fHurryPatience(3000000),
+	fHurryEased(0),
 	fDemuxPhase(0),
 	fDecodePhase(0),
 	fPresentPhase(0),
@@ -1204,6 +1209,8 @@ Player::Stats()
 	PlayerStats stats;
 	stats.framesShown = fFramesShown;
 	stats.framesDropped = fFramesDropped;
+	stats.hurry = fHurry;
+	stats.lateness = fLateness;
 	{
 		std::lock_guard<std::mutex> lock(fLock);
 		stats.displayRate = fDisplayRate;
@@ -1330,6 +1337,7 @@ Player::_PerformSeek()
 	int videoSerial = fVideoQueue.Flush();
 	int audioSerial = fAudioQueue.Flush();
 	fFrames.Flush();
+	fLateness = 0;
 
 	bigtime_t frameDuration = fVideoTrack.frameRate > 0
 		? (bigtime_t)(1000000.0 / fVideoTrack.frameRate) : 40000;
@@ -1598,6 +1606,50 @@ Player::_FallBackToSoftware(const char* why)
 }
 
 
+/*!	When pictures come out of the decoder later than they are due - the
+	processor is too slow for the film, or the film plays fast - the decoder
+	leaves work out, a step at a time, until they come on time; then it puts
+	the work back, more slowly. Falling a second behind skips to key frames
+	until it has caught up.
+*/
+int
+Player::_HurryLevel()
+{
+	bool active;
+	{
+		std::lock_guard<std::mutex> lock(fLock);
+		active = fPlaying && !fScanning;
+	}
+	bigtime_t now = system_time();
+	bigtime_t lateness = fLateness;
+	bigtime_t since = now - fHurryChanged;
+	int level = fHurry;
+	if (!active) {
+		// Paused or scanning: nothing to keep up with.
+	} else if (level == 4) {
+		if (lateness < 50000)
+			level = 2;
+	} else if (lateness > 1000000 && level >= 2 && since > 500000) {
+		level = 4;
+	} else if (lateness > 120000 && level < 3 && since > 500000) {
+		level++;
+		// Behind again soon after easing off: wait longer next time.
+		if (now - fHurryEased < 10000000)
+			fHurryPatience = std::min(fHurryPatience * 2, (bigtime_t)60000000);
+	} else if (lateness < 20000 && level > 0 && since > fHurryPatience) {
+		level--;
+		fHurryEased = now;
+	}
+	if (level != fHurry) {
+		TRACE("airTime: %.0f ms late, decoding at hurry level %d\n",
+			lateness / 1000.0, level);
+		fHurry = level;
+		fHurryChanged = now;
+	}
+	return fHurry;
+}
+
+
 void
 Player::_VideoDecodeLoop()
 {
@@ -1635,6 +1687,7 @@ Player::_VideoDecodeLoop()
 			std::lock_guard<std::mutex> lock(fLock);
 			decoder->SetKeyframesOnly(fScanning);
 		}
+		decoder->SetHurry(_HurryLevel());
 
 		VideoFramePtr frame;
 		bigtime_t decodeStart = system_time();
@@ -2001,6 +2054,9 @@ Player::_PresentLoop()
 				continue;
 			}
 		}
+
+		// How late pictures are coming, for the decoder to catch up.
+		fLateness = (fLateness * 7 + std::max((bigtime_t)0, -delay)) / 8;
 
 		// Late: let it go if the next one is due as well.
 		VideoFramePtr next = fFrames.Peek(1);

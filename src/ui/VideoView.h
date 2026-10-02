@@ -72,6 +72,10 @@ public:
 
 private:
 			bool				_DrawDirect(BBitmap* bitmap, BRect rect);
+			float				_DirectScale();
+			static void			_DeviceRect(BRect rect, BPoint origin,
+									float scale, int* left, int* top,
+									int* width, int* height);
 			BRect				_VideoRectFor(BRect bounds) const;
 			bool				_Compose(const VideoFramePtr& frame,
 									int index, int width, int height);
@@ -117,6 +121,15 @@ private:
 			clipping_rect		fDirectWindowBounds;
 			std::vector<clipping_rect> fDirectClips;
 			BPoint				fWindowOrigin;
+			// On a desktop drawn at a higher density (B_DIRECT_DEVICE_PIXELS)
+			// the window is placed and clipped in frame buffer pixels, the
+			// picture is made at that density, and app_server's own copy of
+			// the screen has to be drawn into as well as the frame buffer.
+			float				fDirectScale;
+			area_id				fDrawingSource;
+			area_id				fDrawingClone;
+			uint8*				fDrawingBits;
+			int32				fDrawingBytesPerRow;
 };
 
 }	// namespace airtime

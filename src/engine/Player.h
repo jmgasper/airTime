@@ -70,6 +70,8 @@ struct PlayerStats {
 	int				scanSeeks;
 	bigtime_t		scanShown;
 	bool			scanAwaiting;
+	int				hurry;			// see VideoDecoder::SetHurry()
+	bigtime_t		lateness;		// how late pictures come, smoothed
 };
 
 
@@ -163,6 +165,7 @@ private:
 
 			void				_DemuxLoop();
 			void				_VideoDecodeLoop();
+			int					_HurryLevel();
 			void				_PresentLoop();
 			void				_SubtitlePrerollLoop();
 			void				_RequestSubtitlePreroll(bigtime_t time);
@@ -294,6 +297,15 @@ private:
 			double				fDisplayRate;
 			bigtime_t			fLastAVOffset;
 			std::atomic<bigtime_t> fDecodeTime;
+			// How late pictures are when their turn comes, smoothed, and
+			// how much the decoder leaves out to catch up.
+			std::atomic<bigtime_t> fLateness;
+			int					fHurry;
+			bigtime_t			fHurryChanged;
+			// How long pictures must be on time before less is left out;
+			// doubled whenever that turned out too soon.
+			bigtime_t			fHurryPatience;
+			bigtime_t			fHurryEased;
 			// What the threads are doing, for diagnosis.
 			std::atomic<int>	fDemuxPhase;
 			std::atomic<int>	fDecodePhase;
