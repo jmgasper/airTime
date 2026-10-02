@@ -7,6 +7,7 @@
 
 
 #include <atomic>
+#include <deque>
 
 #include <String.h>
 
@@ -88,6 +89,13 @@ public:
 	virtual	status_t			Decode(VideoFramePtr& frame);
 
 private:
+			VideoFramePtr		_MakeFrame(AVFrame* picture, AVRational timeBase,
+									bigtime_t duration);
+			bool				_Deinterlace(AVFrame* picture);
+			bool				_SetupDeinterlacer(const AVFrame* picture);
+			void				_FreeDeinterlacer();
+			void				_TakeDeinterlaced();
+
 			AVCodecContext*		fContext;
 			AVPacket*			fPacket;
 			AVFrame*			fFrame;
@@ -96,6 +104,16 @@ private:
 			bool				fFinished;
 			bool				fKeyframesOnlyApplied;
 			int					fHurryApplied;
+
+			// Interlaced pictures go through libavfilter's bwdif, a picture
+			// a field, or a picture a frame when the decoder is hurrying.
+			AVFilterGraph*		fDeinterlaceGraph;
+			AVFilterContext*	fDeinterlaceSource;
+			AVFilterContext*	fDeinterlaceSink;
+			bool				fDeinterlaceFields;
+			bool				fDeinterlaceFailed;
+			bool				fDeinterlaceWanted;
+			std::deque<VideoFramePtr> fReady;
 };
 
 

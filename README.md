@@ -28,6 +28,14 @@ it can.
   The Movie Inspector (⌘I) says which decoder is in use and, when it is the
   processor, why the hardware was not used.
 * **HDR10 and HLG** films are tone mapped for an ordinary display.
+* **Interlaced video** (1080i broadcasts, DVDs) is deinterlaced with
+  libavfilter's bwdif, a picture a field, so motion stays smooth.
+* **Keeping up**: when the processor cannot decode a film as fast as it
+  plays, airTime leaves out deblocking and then unreferenced pictures until
+  it can, and sound and picture stay together.
+* **High density screens**: on air/OS's app_server the picture is drawn
+  straight into the frame buffer at the screen's own density, so a 4K film
+  on a 200% desktop keeps its detail.
 * **Window resizing** that keeps the film's proportions once the resize
   corner is let go (View ▸ Keep Proportions), plus Half, Actual and Double
   Size and Fit to Screen (⌘0–⌘3), as QuickTime had.

@@ -6,7 +6,9 @@
 
 #include "VideoDecoder.h"
 
+#include <algorithm>
 #include <stdio.h>
+#include <stdlib.h>
 #include <thread>
 
 
@@ -71,13 +73,20 @@ SoftwareVideoDecoder::SoftwareVideoDecoder(AVStream* stream,
 	fDraining(false),
 	fFinished(false),
 	fKeyframesOnlyApplied(false),
-	fHurryApplied(0)
+	fHurryApplied(0),
+	fDeinterlaceGraph(NULL),
+	fDeinterlaceSource(NULL),
+	fDeinterlaceSink(NULL),
+	fDeinterlaceFields(true),
+	fDeinterlaceFailed(false),
+	fDeinterlaceWanted(getenv("AIRTIME_NO_DEINTERLACE") == NULL)
 {
 }
 
 
 SoftwareVideoDecoder::~SoftwareVideoDecoder()
 {
+	_FreeDeinterlacer();
 	avcodec_free_context(&fContext);
 	av_packet_free(&fPacket);
 	av_frame_free(&fFrame);
@@ -154,29 +163,36 @@ SoftwareVideoDecoder::Decode(VideoFramePtr& output)
 	}
 
 	for (;;) {
+		if (!fReady.empty()) {
+			output = fReady.front();
+			fReady.pop_front();
+			return B_OK;
+		}
 		if (!fFinished) {
 			int result = avcodec_receive_frame(fContext, fFrame);
 			if (result >= 0) {
 				fPacketsWithoutFrame = 0;
+				if (!fKeyframesOnlyApplied && _Deinterlace(fFrame))
+					continue;
 				int64 timestamp = fFrame->best_effort_timestamp;
 				if (timestamp == AV_NOPTS_VALUE)
 					timestamp = fFrame->pts;
-				bigtime_t pts = _MediaTime(to_micros(timestamp,
-					fStream->time_base));
-
-				VideoFramePtr frame = std::make_shared<VideoFrame>();
-				av_frame_move_ref(frame->frame, fFrame);
-				frame->pts = pts;
-				frame->serial = fSerial;
-				frame->duration = frame->frame->duration > 0
-					? to_micros(frame->frame->duration, fStream->time_base)
+				fFrame->pts = timestamp;
+				bigtime_t duration = fFrame->duration > 0
+					? to_micros(fFrame->duration, fStream->time_base)
 					: _FrameDuration();
-				if (frame->duration <= 0 || frame->duration > 1000000)
-					frame->duration = _FrameDuration();
-				output = frame;
+				output = _MakeFrame(fFrame, fStream->time_base, duration);
 				return B_OK;
 			}
 			if (result == AVERROR_EOF) {
+				// What the deinterlacer still holds comes out first.
+				if (fDeinterlaceGraph != NULL) {
+					if (av_buffersrc_add_frame(fDeinterlaceSource, NULL) >= 0)
+						_TakeDeinterlaced();
+					_FreeDeinterlacer();
+					if (!fReady.empty())
+						continue;
+				}
 				fFinished = true;
 				fDraining = false;
 				avcodec_flush_buffers(fContext);
@@ -196,6 +212,8 @@ SoftwareVideoDecoder::Decode(VideoFramePtr& output)
 				return B_INTERRUPTED;
 			if (serial != fSerial) {
 				avcodec_flush_buffers(fContext);
+				_FreeDeinterlacer();
+				fReady.clear();
 				fSerial = serial;
 				fFinished = false;
 				fDraining = false;
@@ -228,6 +246,137 @@ SoftwareVideoDecoder::Decode(VideoFramePtr& output)
 		fPacketPending = false;
 		av_packet_unref(fPacket);
 	}
+}
+
+VideoFramePtr
+SoftwareVideoDecoder::_MakeFrame(AVFrame* picture, AVRational timeBase,
+	bigtime_t duration)
+{
+	VideoFramePtr frame = std::make_shared<VideoFrame>();
+	int64 timestamp = picture->pts;
+	frame->pts = timestamp != AV_NOPTS_VALUE
+		? _MediaTime(to_micros(timestamp, timeBase)) : kNoTime;
+	av_frame_move_ref(frame->frame, picture);
+	frame->serial = fSerial;
+	frame->duration = duration;
+	if (frame->duration <= 0 || frame->duration > 1000000)
+		frame->duration = _FrameDuration();
+	return frame;
+}
+
+
+/*!	Sends an interlaced picture through the deinterlacer and queues what
+	comes out. Returns false for a picture to be shown as it is. */
+bool
+SoftwareVideoDecoder::_Deinterlace(AVFrame* picture)
+{
+#ifdef AV_FRAME_FLAG_INTERLACED
+	bool interlaced = (picture->flags & AV_FRAME_FLAG_INTERLACED) != 0;
+#else
+	bool interlaced = picture->interlaced_frame != 0;
+#endif
+	if (!fDeinterlaceWanted || fDeinterlaceFailed)
+		return false;
+	if (!interlaced && fDeinterlaceGraph == NULL)
+		return false;
+
+	// Hurrying: a picture a frame instead of one a field.
+	bool fields = fHurryApplied < 2;
+	if (fDeinterlaceGraph != NULL && fields != fDeinterlaceFields)
+		_FreeDeinterlacer();
+	fDeinterlaceFields = fields;
+	if (fDeinterlaceGraph == NULL && !_SetupDeinterlacer(picture)) {
+		fDeinterlaceFailed = true;
+		return false;
+	}
+
+	int64 timestamp = picture->best_effort_timestamp;
+	if (timestamp == AV_NOPTS_VALUE)
+		timestamp = picture->pts;
+	picture->pts = timestamp;
+	if (av_buffersrc_add_frame(fDeinterlaceSource, picture) < 0) {
+		av_frame_unref(picture);
+		return true;
+	}
+	_TakeDeinterlaced();
+	return true;
+}
+
+
+void
+SoftwareVideoDecoder::_TakeDeinterlaced()
+{
+	AVRational timeBase = av_buffersink_get_time_base(fDeinterlaceSink);
+	bigtime_t duration = fDeinterlaceFields
+		? _FrameDuration() / 2 : _FrameDuration();
+	for (;;) {
+		AVFrame* picture = av_frame_alloc();
+		if (picture == NULL)
+			return;
+		if (av_buffersink_get_frame(fDeinterlaceSink, picture) < 0) {
+			av_frame_free(&picture);
+			return;
+		}
+		fReady.push_back(_MakeFrame(picture, timeBase, duration));
+		av_frame_free(&picture);
+	}
+}
+
+
+bool
+SoftwareVideoDecoder::_SetupDeinterlacer(const AVFrame* picture)
+{
+	fDeinterlaceGraph = avfilter_graph_alloc();
+	if (fDeinterlaceGraph == NULL)
+		return false;
+	unsigned cpus = std::thread::hardware_concurrency();
+	fDeinterlaceGraph->nb_threads = cpus > 0 ? (int)std::min(cpus, 8u) : 4;
+
+	AVRational timeBase = fStream->time_base;
+	AVRational aspect = picture->sample_aspect_ratio;
+	if (aspect.num <= 0 || aspect.den <= 0)
+		aspect = (AVRational){1, 1};
+	AVRational rate = fStream->avg_frame_rate;
+	if (rate.num <= 0 || rate.den <= 0)
+		rate = fStream->r_frame_rate;
+	if (rate.num <= 0 || rate.den <= 0)
+		rate = (AVRational){25, 1};
+	char arguments[256];
+	snprintf(arguments, sizeof(arguments),
+		"video_size=%dx%d:pix_fmt=%d:time_base=%d/%d:pixel_aspect=%d/%d:"
+		"frame_rate=%d/%d", picture->width, picture->height, picture->format,
+		timeBase.num, timeBase.den, aspect.num, aspect.den, rate.num, rate.den);
+	char filter[96];
+	snprintf(filter, sizeof(filter), "mode=%s:parity=auto:deint=interlaced",
+		fDeinterlaceFields ? "send_field" : "send_frame");
+
+	AVFilterContext* deinterlacer = NULL;
+	if (avfilter_graph_create_filter(&fDeinterlaceSource,
+			avfilter_get_by_name("buffer"), "in", arguments, NULL,
+			fDeinterlaceGraph) < 0
+		|| avfilter_graph_create_filter(&deinterlacer,
+			avfilter_get_by_name("bwdif"), "deinterlace", filter, NULL,
+			fDeinterlaceGraph) < 0
+		|| avfilter_graph_create_filter(&fDeinterlaceSink,
+			avfilter_get_by_name("buffersink"), "out", NULL, NULL,
+			fDeinterlaceGraph) < 0
+		|| avfilter_link(fDeinterlaceSource, 0, deinterlacer, 0) < 0
+		|| avfilter_link(deinterlacer, 0, fDeinterlaceSink, 0) < 0
+		|| avfilter_graph_config(fDeinterlaceGraph, NULL) < 0) {
+		fprintf(stderr, "airTime: no deinterlacer for this film\n");
+		_FreeDeinterlacer();
+		return false;
+	}
+	return true;
+}
+
+
+void
+SoftwareVideoDecoder::_FreeDeinterlacer()
+{
+	avfilter_graph_free(&fDeinterlaceGraph);
+	fDeinterlaceSource = NULL;
+	fDeinterlaceSink = NULL;
 }
 
 }	// namespace airtime

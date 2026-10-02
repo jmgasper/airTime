@@ -5,7 +5,7 @@
 #   tools/soak-x399.sh films.txt      one path on the X399 per line
 set -uo pipefail
 X399=${X399:-/mnt/HaikuWork/x399}
-SSH=(ssh -F "$X399/ssh/config" -o ConnectTimeout=10 ws-haiku)
+SSH=(ssh -n -F "$X399/ssh/config" -o ConnectTimeout=10 ws-haiku)
 APP=application/x-vnd.airOS-airTime
 LIST=${1:?list of films}
 
