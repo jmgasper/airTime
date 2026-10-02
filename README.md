@@ -112,6 +112,27 @@ its headers instead; pass `FFMPEG_CFLAGS` and `FFMPEG_LDFLAGS` as
 
 For the ROCK 5 (arm64), cross-built on Linux: `tools/build-arm64.sh`.
 
+## What the hardware decoding needs
+
+airTime finds the decoders by name among the Media Kit's decoder add-ons
+(user add-ons first, as the Media Kit does). Both come from the air/OS tree,
+branch `airtime-decoders`:
+
+* **X399**: `src/add-ons/media/plugins/nvdec` from commit `a51f2edebf` or
+  later — HEVC and 16 reference frames need it. It is not built by Jam (it
+  needs NVIDIA's resource manager headers from the NVK checkout on the
+  workstation): `docs/x399-workstation/tools/build-nvdec-plugin.sh` builds
+  and installs it into the user's non-packaged add-ons. An older `nvdec`
+  still works for H.264 with up to 15 reference frames; airTime asks it for
+  nothing else.
+* **ROCK 5 ITX**: the `rk3588_vpu` kernel driver and the `00_rockchip_mpp`
+  add-on from commit `99926997b8` (DMA pool, power domains kept on while
+  decoding, cacheable buffers with cache maintenance). The add-on in the
+  current `rock5_ffmpeg` package stalls on H.264 and is too slow at 1080p;
+  `tools/rock5-itx/build-mpp-addon-arm64.sh` builds the fixed one.
+
+Without them, everything plays in software.
+
 ## Testing
 
 * `make check-host` runs the engine tests on Linux (time and language
@@ -119,6 +140,8 @@ For the ROCK 5 (arm64), cross-built on Linux: `tools/build-arm64.sh`.
   caption extraction and decoding).
 * `tools/make-caption-test.py <film> <dir>` makes a clip with CEA-608
   captions in its H.264 SEI messages.
+* `tools/ui-test-x399.py [--dev] [film]` clicks, holds and drags the
+  controller over VNC on the X399 and checks what the player did.
 * The player answers to scripting, which the lab tools use: for example
   `hey airTime get Stats of Window 0`, `set Position of Window 0 to 60000000`,
   `set Rate of Window 0 to 8`, `get SubtitleText of Window 0`,
