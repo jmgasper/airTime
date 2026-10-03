@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "FFmpeg.h"
+#include "YuvScaler.h"
 
 
 namespace airtime {
@@ -46,8 +47,11 @@ private:
 
 			// High dynamic range: PQ or HLG, BT.2020, shown on an ordinary
 			// display.
-			std::vector<uint16>	fLinear;		// R'G'B' 16 bit, scaled
-			std::vector<float>	fTransfer;		// code -> linear, 1 = SDR white
+			YuvScaler			fScaler;		// ten-bit 4:2:0
+			std::vector<uint16>	fLinear;		// R'G'B' 16 bit, scaled, for
+												// the rest
+			std::vector<float>	fTransfer;		// 4096 steps of code ->
+												// linear, 1 = SDR white
 			std::vector<uint8>	fEncode;		// linear -> sRGB, 4096 steps
 			int					fTransferKind;
 			float				fPeak;			// content peak, 1 = SDR white

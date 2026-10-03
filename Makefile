@@ -53,19 +53,20 @@ $(BUILD)/%.o: %.cpp
 -include $(APP_OBJ:.o=.d)
 
 # Tests of the parts that do not need Haiku: time and language helpers,
-# subtitle markup, caption extraction. They build against the host's FFmpeg
+# subtitle markup, caption extraction, the ten-bit scaler. They build against the host's FFmpeg
 # and a few stand-ins for Haiku types (tests/host).
 HOST_CXX ?= g++
 HOST_BUILD ?= build-host
-HOST_FFMPEG_CFLAGS ?= $(shell pkg-config --cflags libavformat libavcodec libavutil 2>/dev/null \
+HOST_FFMPEG_CFLAGS ?= $(shell pkg-config --cflags libavformat libavcodec libavutil libswscale 2>/dev/null \
 	|| echo -I/mnt/HaikuWork/artifacts/ffmpeg-arm64/stage/boot/system/non-packaged/include)
-HOST_FFMPEG_LIBS ?= $(shell pkg-config --libs libavformat libavcodec libavutil 2>/dev/null \
-	|| echo -l:libavformat.so.60 -l:libavcodec.so.60 -l:libavutil.so.58)
+HOST_FFMPEG_LIBS ?= $(shell pkg-config --libs libavformat libavcodec libavutil libswscale 2>/dev/null \
+	|| echo -l:libavformat.so.60 -l:libavcodec.so.60 -l:libavutil.so.58 -l:libswscale.so.7)
 TEST_SRC = tests/EngineTests.cpp src/engine/Tracks.cpp src/engine/Languages.cpp \
-	src/engine/Bitstream.cpp src/engine/Subtitles.cpp
-$(HOST_BUILD)/engine_tests: $(TEST_SRC) $(wildcard tests/host/*.h) $(wildcard src/engine/*.h)
+	src/engine/Bitstream.cpp src/engine/Subtitles.cpp src/ui/YuvScaler.cpp
+$(HOST_BUILD)/engine_tests: $(TEST_SRC) $(wildcard tests/host/*.h) $(wildcard src/engine/*.h) \
+		src/ui/YuvScaler.h
 	@mkdir -p $(HOST_BUILD)
-	$(HOST_CXX) -std=c++17 -O1 -g -Wall -Wno-multichar -Itests/host -Isrc/engine \
+	$(HOST_CXX) -std=c++17 -O1 -g -Wall -Wno-multichar -Itests/host -Isrc/engine -Isrc/ui \
 		$(HOST_FFMPEG_CFLAGS) -o $@ $(TEST_SRC) $(HOST_FFMPEG_LIBS) -pthread
 
 $(HOST_BUILD)/caption_dump: tests/CaptionDump.cpp src/engine/Subtitles.cpp \
@@ -74,11 +75,20 @@ $(HOST_BUILD)/caption_dump: tests/CaptionDump.cpp src/engine/Subtitles.cpp \
 	$(HOST_CXX) -std=c++17 -O1 -g -Itests/host -Isrc/engine $(HOST_FFMPEG_CFLAGS) \
 		-o $@ $^ $(HOST_FFMPEG_LIBS) -pthread
 
+$(HOST_BUILD)/renderer_tests: tests/RendererTests.cpp src/ui/FrameRenderer.cpp \
+		src/ui/YuvScaler.cpp $(wildcard src/ui/*.h) $(wildcard tests/host/*.h)
+	@mkdir -p $(HOST_BUILD)
+	$(HOST_CXX) -std=c++17 -O2 -g -Wall -Wno-multichar -Itests/host -Isrc/engine -Isrc/ui \
+		$(HOST_FFMPEG_CFLAGS) -o $@ tests/RendererTests.cpp src/ui/FrameRenderer.cpp \
+		src/ui/YuvScaler.cpp $(HOST_FFMPEG_LIBS) -pthread
+
 AIRTIME_TEST_MEDIA ?= $(wildcard /mnt/HaikuWork/artifacts/airtime-media)
 export AIRTIME_TEST_MEDIA
 
-check-host: $(HOST_BUILD)/engine_tests $(HOST_BUILD)/caption_dump
+check-host: $(HOST_BUILD)/engine_tests $(HOST_BUILD)/caption_dump \
+		$(HOST_BUILD)/renderer_tests
 	$(HOST_BUILD)/engine_tests
+	$(HOST_BUILD)/renderer_tests 1
 
 check: check-host
 

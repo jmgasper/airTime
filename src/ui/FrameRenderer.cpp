@@ -18,6 +18,11 @@ extern "C" {
 }
 
 #include "WorkerPool.h"
+#include "YuvScaler.h"
+
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 
 
 namespace airtime {
@@ -300,9 +305,9 @@ FrameRenderer::_PrepareToneMapping(const AVFrame* frame)
 	fTransferKind = kind;
 	fPeak = peak;
 
-	fTransfer.resize(65536);
-	for (int i = 0; i < 65536; i++) {
-		double code = i / 65535.0;
+	fTransfer.resize(4096);
+	for (int i = 0; i < 4096; i++) {
+		double code = i / 4095.0;
 		double light;
 		if (kind == AVCOL_TRC_SMPTE2084)
 			light = pq_to_nits(code) / kReferenceWhite;
@@ -323,99 +328,327 @@ FrameRenderer::_PrepareToneMapping(const AVFrame* frame)
 }
 
 
+namespace {
+
+/*!	Linear light in BT.2020 to sRGB pixels: the gamut changed to BT.709 and
+	the highlights above a knee compressed so that the film's peak lands on
+	white. */
+struct ToneMap {
+	const float*	transfer;	// R'G'B' in 4096 steps -> linear, 1 = SDR white
+	const uint8*	encode;		// linear in 4096 steps -> sRGB
+	bool			hlg;
+	float			knee;
+	float			inverseExcessPeakSquared;
+
+	inline void Map(float r, float g, float b, uint8* out) const
+	{
+		if (hlg) {
+			// The display's system gamma (1.2 at 1000 nits).
+			float luminance = 0.2627f * r + 0.6780f * g + 0.0593f * b;
+			float gain = 1000.0f / 203.0f
+				* powf(std::max(luminance, 1e-6f), 0.2f);
+			r *= gain;
+			g *= gain;
+			b *= gain;
+		}
+		float r709 = 1.6605f * r - 0.5876f * g - 0.0728f * b;
+		float g709 = -0.1246f * r + 1.1329f * g - 0.0083f * b;
+		float b709 = -0.0182f * r - 0.1006f * g + 1.1187f * b;
+		r709 = std::max(r709, 0.0f);
+		g709 = std::max(g709, 0.0f);
+		b709 = std::max(b709, 0.0f);
+
+		// On the largest channel, so that hues hold. Linear up to the knee;
+		// above it the excess is compressed (Reinhard, extended, on the
+		// excess alone, which keeps the slope continuous at the knee).
+		float maximum = std::max(r709, std::max(g709, b709));
+		if (maximum > knee) {
+			float excess = (maximum - knee) / (1 - knee);
+			float mapped = knee + (1 - knee) * excess
+				* (1 + excess * inverseExcessPeakSquared) / (1 + excess);
+			float scale = mapped / maximum;
+			r709 *= scale;
+			g709 *= scale;
+			b709 *= scale;
+		}
+		out[2] = encode[std::min(4095, (int)(r709 * 4095 + 0.5f))];
+		out[1] = encode[std::min(4095, (int)(g709 * 4095 + 0.5f))];
+		out[0] = encode[std::min(4095, (int)(b709 * 4095 + 0.5f))];
+		out[3] = 255;
+	}
+};
+
+
+inline int
+code_index(float value)
+{
+	return value <= 0 ? 0 : value >= 1 ? 4095 : (int)(value * 4095 + 0.5f);
+}
+
+
+/*!	Y'CbCr, as the scaler gives it (ten-bit codes times 64), to R'G'B'. */
+struct ColorMatrix {
+	float			lumaOffset;
+	float			lumaScale;
+	float			chromaScale;
+	float			redCr;
+	float			greenCb;
+	float			greenCr;
+	float			blueCb;
+
+	void Set(const AVFrame* frame)
+	{
+		float kr = 0.2627f;
+		float kb = 0.0593f;
+		switch (frame->colorspace) {
+			case AVCOL_SPC_BT709:
+				kr = 0.2126f;
+				kb = 0.0722f;
+				break;
+			case AVCOL_SPC_BT470BG:
+			case AVCOL_SPC_SMPTE170M:
+				kr = 0.299f;
+				kb = 0.114f;
+				break;
+			default:
+				break;
+		}
+		float kg = 1 - kr - kb;
+		bool full = frame->color_range == AVCOL_RANGE_JPEG;
+		lumaOffset = full ? 0 : 64 * 64;
+		lumaScale = 1.0f / ((full ? 1023 : 876) * 64);
+		chromaScale = 1.0f / ((full ? 1023 : 896) * 64);
+		redCr = 2 * (1 - kr);
+		greenCb = -2 * kb * (1 - kb) / kg;
+		greenCr = -2 * kr * (1 - kr) / kg;
+		blueCb = 2 * (1 - kb);
+	}
+};
+
+
+/*!	A row of scaled Y'CbCr to pixels. */
+void
+map_row(const ToneMap& map, const ColorMatrix& matrix, const uint16* luma,
+	const uint16* cb, const uint16* cr, int width, uint8* out)
+{
+	const float* transfer = map.transfer;
+	int x = 0;
+#if defined(__aarch64__)
+	// Four pixels at a time: the arithmetic in vectors, the table lookups
+	// lane by lane. (HLG's gain is left to the plain code.)
+	if (!map.hlg) {
+		const float32x4_t zero = vdupq_n_f32(0);
+		const float32x4_t one = vdupq_n_f32(1);
+		const float32x4_t steps = vdupq_n_f32(4095);
+		const float32x4_t lumaOffset = vdupq_n_f32(matrix.lumaOffset);
+		const float32x4_t chromaOffset = vdupq_n_f32(32768);
+		const float32x4_t knee = vdupq_n_f32(map.knee);
+		const float overKnee = 1 / (1 - map.knee);
+		const uint8* encode = map.encode;
+		for (; x + 4 <= width; x += 4, out += 16) {
+			float32x4_t l = vmulq_n_f32(vsubq_f32(vcvtq_f32_u32(vmovl_u16(
+				vld1_u16(luma + x))), lumaOffset), matrix.lumaScale);
+			float32x4_t u = vmulq_n_f32(vsubq_f32(vcvtq_f32_u32(vmovl_u16(
+				vld1_u16(cb + x))), chromaOffset), matrix.chromaScale);
+			float32x4_t v = vmulq_n_f32(vsubq_f32(vcvtq_f32_u32(vmovl_u16(
+				vld1_u16(cr + x))), chromaOffset), matrix.chromaScale);
+			float32x4_t codes[3] = {
+				vfmaq_n_f32(l, v, matrix.redCr),
+				vfmaq_n_f32(vfmaq_n_f32(l, u, matrix.greenCb), v,
+					matrix.greenCr),
+				vfmaq_n_f32(l, u, matrix.blueCb)};
+			float32x4_t light[3];
+			for (int c = 0; c < 3; c++) {
+				uint32x4_t index = vcvtnq_u32_f32(vmulq_f32(vminq_f32(
+					vmaxq_f32(codes[c], zero), one), steps));
+				float32x4_t value = zero;
+				value = vld1q_lane_f32(transfer + vgetq_lane_u32(index, 0),
+					value, 0);
+				value = vld1q_lane_f32(transfer + vgetq_lane_u32(index, 1),
+					value, 1);
+				value = vld1q_lane_f32(transfer + vgetq_lane_u32(index, 2),
+					value, 2);
+				value = vld1q_lane_f32(transfer + vgetq_lane_u32(index, 3),
+					value, 3);
+				light[c] = value;
+			}
+			const float32x4_t& r = light[0];
+			const float32x4_t& g = light[1];
+			const float32x4_t& b = light[2];
+			float32x4_t r709 = vmaxq_f32(vfmaq_n_f32(vfmaq_n_f32(
+				vmulq_n_f32(r, 1.6605f), g, -0.5876f), b, -0.0728f), zero);
+			float32x4_t g709 = vmaxq_f32(vfmaq_n_f32(vfmaq_n_f32(
+				vmulq_n_f32(r, -0.1246f), g, 1.1329f), b, -0.0083f), zero);
+			float32x4_t b709 = vmaxq_f32(vfmaq_n_f32(vfmaq_n_f32(
+				vmulq_n_f32(r, -0.0182f), g, -0.1006f), b, 1.1187f), zero);
+
+			// As in ToneMap::Map(), with its two divisions made one.
+			float32x4_t maximum = vmaxq_f32(r709, vmaxq_f32(g709, b709));
+			float32x4_t excess = vmulq_n_f32(vsubq_f32(maximum, knee),
+				overKnee);
+			float32x4_t onePlus = vaddq_f32(one, excess);
+			float32x4_t mapped = vfmaq_f32(vmulq_f32(knee, onePlus),
+				vmulq_n_f32(excess, 1 - map.knee),
+				vfmaq_n_f32(one, excess, map.inverseExcessPeakSquared));
+			float32x4_t scale = vbslq_f32(vcgtq_f32(maximum, knee),
+				vdivq_f32(mapped, vmulq_f32(maximum, onePlus)), one);
+
+			uint32x4_t red = vcvtnq_u32_f32(vminq_f32(vmulq_f32(
+				vmulq_f32(r709, scale), steps), steps));
+			uint32x4_t green = vcvtnq_u32_f32(vminq_f32(vmulq_f32(
+				vmulq_f32(g709, scale), steps), steps));
+			uint32x4_t blue = vcvtnq_u32_f32(vminq_f32(vmulq_f32(
+				vmulq_f32(b709, scale), steps), steps));
+			uint32 pixels[4] = {
+				0xff000000u | encode[vgetq_lane_u32(red, 0)] << 16
+					| encode[vgetq_lane_u32(green, 0)] << 8
+					| encode[vgetq_lane_u32(blue, 0)],
+				0xff000000u | encode[vgetq_lane_u32(red, 1)] << 16
+					| encode[vgetq_lane_u32(green, 1)] << 8
+					| encode[vgetq_lane_u32(blue, 1)],
+				0xff000000u | encode[vgetq_lane_u32(red, 2)] << 16
+					| encode[vgetq_lane_u32(green, 2)] << 8
+					| encode[vgetq_lane_u32(blue, 2)],
+				0xff000000u | encode[vgetq_lane_u32(red, 3)] << 16
+					| encode[vgetq_lane_u32(green, 3)] << 8
+					| encode[vgetq_lane_u32(blue, 3)]};
+			memcpy(out, pixels, sizeof(pixels));
+		}
+	}
+#endif
+	for (; x < width; x++, out += 4) {
+		float l = (luma[x] - matrix.lumaOffset) * matrix.lumaScale;
+		float u = (cb[x] - 32768.0f) * matrix.chromaScale;
+		float v = (cr[x] - 32768.0f) * matrix.chromaScale;
+		map.Map(transfer[code_index(l + matrix.redCr * v)],
+			transfer[code_index(l + matrix.greenCb * u + matrix.greenCr * v)],
+			transfer[code_index(l + matrix.blueCb * u)], out);
+	}
+}
+
+
+/*!	The scaler's vector code is NEON: on ARM it is several times quicker than
+	swscale's 16 bit R'G'B' and the tone mapping after it, while on the X399
+	swscale's own SIMD (and its plain conversion when the picture is not
+	scaled) beats the scaler's plain code. AIRTIME_HDR_SWSCALE and
+	AIRTIME_HDR_SCALER choose. */
+bool
+scaler_path_wanted()
+{
+	if (getenv("AIRTIME_HDR_SWSCALE") != NULL)
+		return false;
+#if defined(__aarch64__)
+	return true;
+#else
+	return getenv("AIRTIME_HDR_SCALER") != NULL;
+#endif
+}
+
+
+struct ScaledRows {
+	YuvScaler::Scratch	scratch;
+	std::vector<uint16>	luma;
+	std::vector<uint16>	cb;
+	std::vector<uint16>	cr;
+};
+
+}	// namespace
+
+
 bool
 FrameRenderer::_RenderHDR(const AVFrame* frame, uint8* bits,
 	int32 bytesPerRow, int width, int height)
 {
-	if (!_Prepare(frame, width, height, true))
-		return false;
 	_PrepareToneMapping(frame);
 	if (fPool.get() == NULL)
 		fPool.reset(new WorkerPool());
 
-	fLinear.resize((size_t)width * height * 3);
-	uint8* target[4] = {(uint8*)fLinear.data(), NULL, NULL, NULL};
-	int targetStride[4] = {width * 6, 0, 0, 0};
+	ToneMap map;
+	map.transfer = fTransfer.data();
+	map.encode = fEncode.data();
+	map.hlg = fTransferKind == AVCOL_TRC_ARIB_STD_B67;
+	map.knee = 0.6f;
+	float excessPeak = std::max((fPeak - map.knee) / (1 - map.knee), 1.01f);
+	map.inverseExcessPeakSquared = 1.0f / (excessPeak * excessPeak);
 
-	av_frame_unref(fTarget);
-	fTarget->format = AV_PIX_FMT_RGB48LE;
-	fTarget->width = width;
-	fTarget->height = height;
-	fTarget->data[0] = target[0];
-	fTarget->linesize[0] = targetStride[0];
-	fTarget->buf[0] = av_buffer_create(target[0], width * 6 * height, no_free,
-		NULL, 0);
-	av_frame_unref(fSource);
-	int result = -1;
-	if (fTarget->buf[0] != NULL && av_frame_ref(fSource, frame) >= 0)
-		result = sws_scale_frame(fContext, fTarget, fSource);
-	av_frame_unref(fSource);
-	av_frame_unref(fTarget);
-	if (result < 0 && sws_scale(fContext, frame->data, frame->linesize, 0,
-			frame->height, target, targetStride) <= 0) {
-		return false;
+	bigtime_t traceStart = system_time();
+	bigtime_t traceScaled = traceStart;
+	if (scaler_path_wanted() && YuvScaler::Handles(frame)
+		&& fScaler.Prepare(frame, width, height)) {
+		// Ten-bit 4:2:0, as the hardware decoders and libavcodec give HDR
+		// films: scaled in Y'CbCr, then made into pixels a row at a time,
+		// all in one pass over the target.
+		ColorMatrix matrix;
+		matrix.Set(frame);
+		fPool->Run(height, [&](int first, int last) {
+			static thread_local ScaledRows rows;
+			rows.luma.resize(width);
+			rows.cb.resize(width);
+			rows.cr.resize(width);
+			for (int y = first; y < last; y++) {
+				fScaler.ScaleRow(frame, y, rows.luma.data(), rows.cb.data(),
+					rows.cr.data(), rows.scratch);
+				map_row(map, matrix, rows.luma.data(), rows.cb.data(),
+					rows.cr.data(), width, bits + y * bytesPerRow);
+			}
+		});
+	} else {
+		// Anything else goes through 16 bit R'G'B' from swscale, still in
+		// its own transfer and primaries, to be mapped down afterwards.
+		if (!_Prepare(frame, width, height, true))
+			return false;
+		fLinear.resize((size_t)width * height * 3);
+		uint8* target[4] = {(uint8*)fLinear.data(), NULL, NULL, NULL};
+		int targetStride[4] = {width * 6, 0, 0, 0};
+
+		av_frame_unref(fTarget);
+		fTarget->format = AV_PIX_FMT_RGB48LE;
+		fTarget->width = width;
+		fTarget->height = height;
+		fTarget->data[0] = target[0];
+		fTarget->linesize[0] = targetStride[0];
+		fTarget->buf[0] = av_buffer_create(target[0], width * 6 * height,
+			no_free, NULL, 0);
+		av_frame_unref(fSource);
+		int result = -1;
+		if (fTarget->buf[0] != NULL && av_frame_ref(fSource, frame) >= 0)
+			result = sws_scale_frame(fContext, fTarget, fSource);
+		av_frame_unref(fSource);
+		av_frame_unref(fTarget);
+		if (result < 0 && sws_scale(fContext, frame->data, frame->linesize, 0,
+				frame->height, target, targetStride) <= 0) {
+			return false;
+		}
+		traceScaled = system_time();
+
+		const uint16* linear = fLinear.data();
+		fPool->Run(height, [&](int first, int last) {
+			for (int y = first; y < last; y++) {
+				const uint16* in = linear + (size_t)y * width * 3;
+				uint8* out = bits + y * bytesPerRow;
+				for (int x = 0; x < width; x++, in += 3, out += 4) {
+					map.Map(map.transfer[in[0] >> 4], map.transfer[in[1] >> 4],
+						map.transfer[in[2] >> 4], out);
+				}
+			}
+		});
 	}
 
-	// BT.2020 to BT.709, in linear light.
-	static const float kGamut[9] = {
-		1.6605f, -0.5876f, -0.0728f,
-		-0.1246f, 1.1329f, -0.0083f,
-		-0.0182f, -0.1006f, 1.1187f};
-	const float* transfer = fTransfer.data();
-	const uint8* encode = fEncode.data();
-	const float peak = fPeak;
-	const bool hlg = fTransferKind == AVCOL_TRC_ARIB_STD_B67;
-	// Linear up to the knee; above it the excess is compressed so that the
-	// peak lands on white (Reinhard, extended, on the excess alone, which
-	// keeps the slope continuous at the knee).
-	const float knee = 0.6f;
-	const float excessPeak = std::max((peak - knee) / (1 - knee), 1.01f);
-	const float inverseExcessPeakSquared = 1.0f / (excessPeak * excessPeak);
-	const uint16* linear = fLinear.data();
-
-	fPool->Run(height, [=](int first, int last) {
-		for (int y = first; y < last; y++) {
-			const uint16* in = linear + (size_t)y * width * 3;
-			uint8* out = bits + y * bytesPerRow;
-			for (int x = 0; x < width; x++, in += 3, out += 4) {
-				float r = transfer[in[0]];
-				float g = transfer[in[1]];
-				float b = transfer[in[2]];
-				if (hlg) {
-					// The display's system gamma (1.2 at 1000 nits).
-					float luminance = 0.2627f * r + 0.6780f * g + 0.0593f * b;
-					float gain = 1000.0f / 203.0f
-						* powf(std::max(luminance, 1e-6f), 0.2f);
-					r *= gain;
-					g *= gain;
-					b *= gain;
-				}
-				float r709 = kGamut[0] * r + kGamut[1] * g + kGamut[2] * b;
-				float g709 = kGamut[3] * r + kGamut[4] * g + kGamut[5] * b;
-				float b709 = kGamut[6] * r + kGamut[7] * g + kGamut[8] * b;
-				r709 = std::max(r709, 0.0f);
-				g709 = std::max(g709, 0.0f);
-				b709 = std::max(b709, 0.0f);
-
-				// On the largest channel, so that hues hold.
-				float maximum = std::max(r709, std::max(g709, b709));
-				if (maximum > knee) {
-					float excess = (maximum - knee) / (1 - knee);
-					float mapped = knee + (1 - knee) * excess
-						* (1 + excess * inverseExcessPeakSquared)
-						/ (1 + excess);
-					float scale = mapped / maximum;
-					r709 *= scale;
-					g709 *= scale;
-					b709 *= scale;
-				}
-				out[2] = encode[std::min(4095, (int)(r709 * 4095 + 0.5f))];
-				out[1] = encode[std::min(4095, (int)(g709 * 4095 + 0.5f))];
-				out[0] = encode[std::min(4095, (int)(b709 * 4095 + 0.5f))];
-				out[3] = 255;
-			}
+	static bool sTrace = getenv("AIRTIME_TRACE_HDR") != NULL;
+	if (sTrace) {
+		static bigtime_t sScale, sMap;
+		static int sCount;
+		sScale += traceScaled - traceStart;
+		sMap += system_time() - traceScaled;
+		if (++sCount == 48) {
+			fprintf(stderr, "airTime: HDR %s %dx%d -> %dx%d: swscale %.1f ms,"
+				" tone mapping %.1f ms\n", av_get_pix_fmt_name(
+					(AVPixelFormat)frame->format), frame->width, frame->height,
+				width, height, sScale / 48000.0, sMap / 48000.0);
+			sScale = sMap = 0;
+			sCount = 0;
 		}
-	});
+	}
 	return true;
 }
 

@@ -11,9 +11,11 @@
  */
 
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -21,6 +23,7 @@
 #include "Languages.h"
 #include "Subtitles.h"
 #include "Tracks.h"
+#include "YuvScaler.h"
 
 
 using namespace airtime;
@@ -431,6 +434,126 @@ test_sps()
 }
 
 
+/*!	The ten-bit scaler against swscale's bilinear filter on a smooth picture
+	(they differ only in rounding and where chroma is sampled), P010 and
+	yuv420p10 giving the same, and flat pictures staying flat. */
+static void
+test_scaler()
+{
+	const int width = 640;
+	const int height = 360;
+	AVFrame* p010 = av_frame_alloc();
+	AVFrame* planar = av_frame_alloc();
+	p010->format = AV_PIX_FMT_P010LE;
+	planar->format = AV_PIX_FMT_YUV420P10LE;
+	for (AVFrame* frame : {p010, planar}) {
+		frame->width = width;
+		frame->height = height;
+		CHECK(av_frame_get_buffer(frame, 0) == 0);
+	}
+	auto lumaAt = [](int x, int y) {
+		return (int)(512 + 300 * sin(x / 23.0) * cos(y / 17.0));
+	};
+	auto chromaAt = [](int x, int y, int plane) {
+		return plane == 0 ? (int)(512 + 200 * sin(x / 40.0))
+			: (int)(512 + 200 * cos(y / 30.0));
+	};
+	for (int y = 0; y < height; y++) {
+		uint16* row = (uint16*)(p010->data[0] + y * p010->linesize[0]);
+		uint16* planarRow = (uint16*)(planar->data[0]
+			+ y * planar->linesize[0]);
+		for (int x = 0; x < width; x++) {
+			row[x] = lumaAt(x, y) << 6;
+			planarRow[x] = lumaAt(x, y);
+		}
+	}
+	for (int y = 0; y < height / 2; y++) {
+		uint16* pairs = (uint16*)(p010->data[1] + y * p010->linesize[1]);
+		uint16* cb = (uint16*)(planar->data[1] + y * planar->linesize[1]);
+		uint16* cr = (uint16*)(planar->data[2] + y * planar->linesize[2]);
+		for (int x = 0; x < width / 2; x++) {
+			pairs[2 * x] = chromaAt(x, y, 0) << 6;
+			pairs[2 * x + 1] = chromaAt(x, y, 1) << 6;
+			cb[x] = chromaAt(x, y, 0);
+			cr[x] = chromaAt(x, y, 1);
+		}
+	}
+
+	const int targetWidth = 293;
+	const int targetHeight = 165;
+	SwsContext* sws = sws_getContext(width, height, AV_PIX_FMT_P010LE,
+		targetWidth, targetHeight, AV_PIX_FMT_YUV444P16LE, SWS_BILINEAR,
+		NULL, NULL, NULL);
+	CHECK(sws != NULL);
+	std::vector<uint16> reference[3];
+	uint8* planes[4];
+	int strides[4] = {targetWidth * 2, targetWidth * 2, targetWidth * 2, 0};
+	for (int i = 0; i < 3; i++) {
+		reference[i].resize(targetWidth * targetHeight);
+		planes[i] = (uint8*)reference[i].data();
+	}
+	planes[3] = NULL;
+	sws_scale(sws, p010->data, p010->linesize, 0, height, planes, strides);
+	sws_freeContext(sws);
+
+	YuvScaler scaler;
+	YuvScaler planarScaler;
+	YuvScaler::Scratch scratch;
+	CHECK(YuvScaler::Handles(p010) && YuvScaler::Handles(planar));
+	CHECK(scaler.Prepare(p010, targetWidth, targetHeight));
+	CHECK(planarScaler.Prepare(planar, targetWidth, targetHeight));
+	std::vector<uint16> row[3], planarRow[3];
+	for (int i = 0; i < 3; i++) {
+		row[i].resize(targetWidth);
+		planarRow[i].resize(targetWidth);
+	}
+	int worst[3] = {};
+	bool same = true;
+	for (int y = 0; y < targetHeight; y++) {
+		scaler.ScaleRow(p010, y, row[0].data(), row[1].data(), row[2].data(),
+			scratch);
+		planarScaler.ScaleRow(planar, y, planarRow[0].data(),
+			planarRow[1].data(), planarRow[2].data(), scratch);
+		for (int i = 0; i < 3; i++) {
+			// Away from the edges, which swscale treats differently.
+			for (int x = 2; x < targetWidth - 2 && y > 1
+					&& y < targetHeight - 2; x++) {
+				int difference = abs(row[i][x] - reference[i][y * targetWidth
+					+ x]) >> 6;
+				worst[i] = std::max(worst[i], difference);
+			}
+			for (int x = 0; x < targetWidth; x++)
+				same = same && abs(row[i][x] - planarRow[i][x]) <= 1;
+		}
+	}
+	printf("scaler: largest difference from swscale %d, %d, %d of 1023\n",
+		worst[0], worst[1], worst[2]);
+	CHECK(worst[0] <= 12 && worst[1] <= 12 && worst[2] <= 12);
+	CHECK(same);
+
+	// Flat stays flat, enlarged and shrunk, edges included.
+	for (int y = 0; y < height; y++) {
+		uint16* luma = (uint16*)(p010->data[0] + y * p010->linesize[0]);
+		for (int x = 0; x < width; x++)
+			luma[x] = 700 << 6;
+	}
+	for (int size : {97, 640, 1500}) {
+		CHECK(scaler.Prepare(p010, size, size * 9 / 16));
+		std::vector<uint16> luma(size), cb(size), cr(size);
+		bool flat = true;
+		for (int y = 0; y < size * 9 / 16; y++) {
+			scaler.ScaleRow(p010, y, luma.data(), cb.data(), cr.data(),
+				scratch);
+			for (int x = 0; x < size; x++)
+				flat = flat && luma[x] == 700 << 6;
+		}
+		CHECK(flat);
+	}
+	av_frame_free(&p010);
+	av_frame_free(&planar);
+}
+
+
 int
 main()
 {
@@ -442,6 +565,7 @@ main()
 	test_files(getenv("AIRTIME_TEST_MEDIA"));
 	test_captions();
 	test_sps();
+	test_scaler();
 	printf("%d checks, %d failed\n", sChecks, sFailures);
 	return sFailures == 0 ? 0 : 1;
 }

@@ -4,6 +4,9 @@
 #
 #   tools/build-arm64.sh            build and package
 #   tools/build-arm64.sh build      only build build-arm64/airTime
+#   tools/build-arm64.sh tests      build the host tests for the board, to
+#                                   try the NEON code there (engine_tests,
+#                                   renderer_tests in build-arm64)
 #
 # What it needs from the air/OS work tree (all overridable):
 #   CROSS     the arm64 cross compiler prefix
@@ -52,6 +55,20 @@ for lib in avformat avcodec avfilter avutil swscale swresample; do
 done
 
 CXX="${CROSS}g++ --sysroot=$SYSROOT -specs=$UNWIND_SPECS"
+if [[ ${1:-} == tests ]]; then
+	TESTFLAGS=(-std=c++17 -O2 -Wall -Wno-multichar -I"$ROOT/src/engine"
+		-I"$ROOT/src/ui" -I"$FFMPEG/include")
+	LINK=(-L"$FARM/lib" -Wl,-rpath-link,"$FFMPEG/lib" -lavformat -lavcodec
+		-lswscale -lavutil -lbe)
+	$CXX "${TESTFLAGS[@]}" -o "$BUILD/engine_tests" "$ROOT/tests/EngineTests.cpp" \
+		"$ROOT"/src/engine/{Tracks,Languages,Bitstream,Subtitles}.cpp \
+		"$ROOT/src/ui/YuvScaler.cpp" "${LINK[@]}"
+	$CXX "${TESTFLAGS[@]}" -o "$BUILD/renderer_tests" \
+		"$ROOT/tests/RendererTests.cpp" "$ROOT/src/ui/FrameRenderer.cpp" \
+		"$ROOT/src/ui/YuvScaler.cpp" "${LINK[@]}"
+	echo "$BUILD/engine_tests $BUILD/renderer_tests"
+	exit 0
+fi
 make -C "$ROOT" -j"$JOBS" BUILD=build-arm64 CXX="$CXX" \
 	HAIKU_HEADERS="$SYSROOT/boot/system/develop/headers" \
 	FFMPEG_CFLAGS="-I$FFMPEG/include" \
