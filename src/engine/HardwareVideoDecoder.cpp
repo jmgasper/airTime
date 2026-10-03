@@ -61,16 +61,20 @@ const HardwareDecoderKind kKinds[] = {
 	{"nvdec", "NVDEC", {{AV_CODEC_ID_H264, 4096, 4096, 8},
 		{AV_CODEC_ID_HEVC, 8192, 8192, 10}, {AV_CODEC_ID_NONE, 0, 0, 0}},
 		15, true},
-	// Rockchip MPP on the RK3588: RKVDEC for H.264 and HEVC, VPU981 for AV1,
-	// eight bit 4:2:0.
+	// Rockchip MPP on the RK3588: RKVDEC for H.264 and HEVC (Main and
+	// Main 10), VPU981 for AV1 (Main, eight and ten bits), 4:2:0. Ten-bit
+	// pictures come over as P010; an add-on too old to give them fails the
+	// stream, which then goes to libavcodec.
 	{"00_rockchip_mpp", "RK3588 VPU", {{AV_CODEC_ID_H264, 8192, 4320, 8},
-		{AV_CODEC_ID_HEVC, 8192, 4320, 8}, {AV_CODEC_ID_AV1, 8192, 4320, 8},
+		{AV_CODEC_ID_HEVC, 8192, 4320, 10}, {AV_CODEC_ID_AV1, 8192, 4320, 10},
 		{AV_CODEC_ID_NONE, 0, 0, 0}}, 0, false},
 };
 
-// Not one of Haiku's colour spaces: the NVDEC add-on's sixteen-bit 4:2:0,
-// a plane of luma then one of Cb and Cr in pairs, both bytes_per_row apart.
+// Not among Haiku's colour spaces: 4:2:0 as a plane of luma then one of Cb
+// and Cr in pairs, both bytes_per_row apart, in sixteen bits (the NVDEC and
+// RK3588 add-ons) or eight (the RK3588 one, which then needs only copy).
 const color_space kColorSpaceP010 = (color_space)0x50303130;	// 'P010'
+const color_space kColorSpaceNV12 = (color_space)0x4e563132;	// 'NV12'
 
 
 struct LoadedAddOn {
@@ -437,6 +441,15 @@ public:
 				// new serial before decoding carries on.
 				return B_INTERRUPTED;
 			}
+			// Past the end of the stream (scanning gives the decoder a key
+			// frame and then the end) an add-on need not ask for another
+			// chunk, which is where a seek is noticed otherwise; the RK3588
+			// one does not, and decoding stopped for good.
+			if (fEndOfStream && fQueue->HasNewerSerial(fSerial)) {
+				fFlushPending = true;
+				fPendingSerial = fQueue->Serial();
+				continue;
+			}
 			if (fDrained && !fQueue->HasNewerSerial(fSerial))
 				return B_LAST_BUFFER_ERROR;
 
@@ -454,10 +467,13 @@ public:
 			picture->width = fWidth;
 			picture->height = fHeight;
 			// Rows exactly as wide as the add-on writes them, and for P010
-			// the chroma plane straight after the luma one, unpadded.
+			// and NV12 the chroma plane straight after the luma one,
+			// unpadded.
+			bool semiPlanar = fPixelFormat == AV_PIX_FMT_P010LE
+				|| fPixelFormat == AV_PIX_FMT_NV12;
 			size_t lumaSize = fRowBytes * fHeight;
-			size_t size = fPixelFormat == AV_PIX_FMT_P010LE
-				? lumaSize * 3 / 2 : lumaSize;
+			size_t size = semiPlanar
+				? lumaSize + fRowBytes * ((fHeight + 1) / 2) : lumaSize;
 			if (fBufferPool == NULL || fBufferSize != size) {
 				av_buffer_pool_uninit(&fBufferPool);
 				fBufferPool = av_buffer_pool_init(size + 64, av_buffer_alloc);
@@ -469,7 +485,7 @@ public:
 				return B_NO_MEMORY;
 			picture->data[0] = picture->buf[0]->data;
 			picture->linesize[0] = (int)fRowBytes;
-			if (fPixelFormat == AV_PIX_FMT_P010LE) {
+			if (semiPlanar) {
 				picture->data[1] = picture->data[0] + lumaSize;
 				picture->linesize[1] = (int)fRowBytes;
 			}
@@ -514,6 +530,8 @@ public:
 			frame->frame->color_trc = fStream->codecpar->color_trc;
 			frame->frame->color_primaries
 				= fStream->codecpar->color_primaries;
+			frame->frame->chroma_location
+				= fStream->codecpar->chroma_location;
 			_AddLightLevels(frame->frame);
 			output = frame;
 			return B_OK;
@@ -611,17 +629,20 @@ private:
 	{
 		// Luma and chroma are cheaper for an add-on to hand over than
 		// pixels, and the conversion to pixels happens anyway while scaling
-		// to the window; ask for them first.
+		// to the window; ask for them first, as the decoder made them if it
+		// can (NV12), else packed.
 		// Ten-bit pictures keep their depth, for the HDR tone mapping.
 		media_format format;
 		status_t status = B_ERROR;
-		static const color_space kSpaces[] = {kColorSpaceP010, B_YCbCr422,
-			B_RGB32};
+		static const color_space kSpaces[] = {kColorSpaceP010,
+			kColorSpaceNV12, B_YCbCr422, B_RGB32};
 		const char* forced = getenv("AIRTIME_HW_RGB");
 		bool tenBit = is_ten_bit(fStream->codecpar);
 		for (color_space space : kSpaces) {
-			if (space == B_YCbCr422 && forced != NULL)
+			if ((space == B_YCbCr422 || space == kColorSpaceNV12)
+				&& forced != NULL) {
 				continue;
+			}
 			if (space == kColorSpaceP010 && (!tenBit || forced != NULL))
 				continue;
 			format.Clear();
@@ -656,6 +677,10 @@ private:
 					fPixelFormat = AV_PIX_FMT_P010LE;
 					break;
 				}
+				if (display.format == kColorSpaceNV12) {
+					fPixelFormat = AV_PIX_FMT_NV12;
+					break;
+				}
 				fprintf(stderr, "airTime: %s offers colour space %#x\n",
 					fAddOn.kind->displayName, (unsigned)display.format);
 				return B_MEDIA_BAD_FORMAT;
@@ -665,7 +690,8 @@ private:
 		if (display.line_count > 0)
 			fHeight = display.line_count;
 		fRowBytes = display.bytes_per_row > 0 ? display.bytes_per_row
-			: (size_t)fWidth * (fPixelFormat == AV_PIX_FMT_BGRA ? 4 : 2);
+			: (size_t)fWidth * (fPixelFormat == AV_PIX_FMT_BGRA ? 4
+				: fPixelFormat == AV_PIX_FMT_NV12 ? 1 : 2);
 
 		media_codec_info codecInfo;
 		memset(&codecInfo, 0, sizeof(codecInfo));

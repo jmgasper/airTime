@@ -23,11 +23,21 @@ it can.
     the tone mapping; a 4K HDR10 film plays at 24 frames a second with about
     14 ms of each frame's time spent decoding.
   * **ROCK 5 ITX** — the RK3588's own decoders through Rockchip MPP (the
-    `00_rockchip_mpp` add-on): H.264 and HEVC on RKVDEC, AV1 on VPU981.
+    `00_rockchip_mpp` add-on): H.264, and HEVC Main and Main 10, on RKVDEC;
+    AV1 Main, eight and ten bits, on VPU981. Pictures come over as NV12, or
+    P010 for ten bits, which costs the add-on a copy (an unpacking, for ten
+    bits) rather than a conversion; a 4K HDR10 film plays at 24 frames a
+    second, full screen, in HEVC or AV1.
 
   The Movie Inspector (⌘I) says which decoder is in use and, when it is the
   processor, why the hardware was not used.
-* **HDR10 and HLG** films are tone mapped for an ordinary display.
+* **HDR10 and HLG** films are tone mapped for an ordinary display. On ARM,
+  ten-bit 4:2:0 pictures are scaled to the window and tone mapped in one
+  pass with NEON, on several threads; on a processor whose cores differ
+  (the RK3588's Cortex-A76 and A55) only the fast ones do it. A 4K film to
+  a 1080p screen takes about 11 ms a picture on the ROCK 5, where swscale
+  and a separate tone mapping took 33. On x86 swscale's SIMD is quicker,
+  and stays (`AIRTIME_HDR_SCALER=1` and `AIRTIME_HDR_SWSCALE=1` choose).
 * **Interlaced video** (1080i broadcasts, DVDs) is deinterlaced with
   libavfilter's bwdif, a picture a field, so motion stays smooth.
 * **Keeping up**: when the processor cannot decode a film as fast as it
@@ -136,9 +146,18 @@ branch `airtime-decoders`:
   nothing else.
 * **ROCK 5 ITX**: the `rk3588_vpu` kernel driver and the `00_rockchip_mpp`
   add-on from commit `99926997b8` (DMA pool, power domains kept on while
-  decoding, cacheable buffers with cache maintenance). The add-on in the
-  current `rock5_ffmpeg` package stalls on H.264 and is too slow at 1080p;
-  `tools/rock5-itx/build-mpp-addon-arm64.sh` builds the fixed one.
+  decoding, cacheable buffers with cache maintenance) for 8-bit films, and
+  from commit `2e3a5ca5fb` for HEVC Main 10 and ten-bit AV1: the add-on
+  hands over ten-bit pictures as P010 and eight-bit ones as NV12 (and no
+  longer has MPP cut ten-bit AV1 to eight), and the driver leaves
+  reference pictures out of its cache maintenance, which halves a 4K job
+  (17 ms to 8 ms), and keeps a 640 MiB pool, which 4K ten-bit AV1 needs.
+  With an older add-on, Main 10 films fall back to libavcodec, about two
+  pictures a second at 4K. The add-on in the current `rock5_ffmpeg`
+  package stalls on H.264 and is too slow at 1080p;
+  `tools/rock5-itx/build-mpp-addon-arm64.sh` builds the fixed one. The
+  driver lives in `/boot/system/non-packaged/add-ons/kernel/drivers/video`
+  and needs a restart to change.
 
 Without them, everything plays in software.
 
@@ -146,7 +165,11 @@ Without them, everything plays in software.
 
 * `make check-host` runs the engine tests on Linux (time and language
   helpers, ASS markup, subtitle files in other encodings, SPS parsing,
-  caption extraction and decoding).
+  caption extraction and decoding, the ten-bit scaler against swscale) and
+  the renderer test (a synthetic HDR10 picture through the scaler and tone
+  mapping against the same arithmetic in double precision, timed against
+  swscale's path). Both also build for arm64, to try the NEON code on the
+  ROCK 5.
 * `tools/make-caption-test.py <film> <dir>` makes a clip with CEA-608
   captions in its H.264 SEI messages.
 * `tools/ui-test-x399.py [--dev] [film]` clicks, holds and drags the
