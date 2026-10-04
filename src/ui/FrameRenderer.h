@@ -10,14 +10,16 @@
 #include <vector>
 
 #include "FFmpeg.h"
+#include "SdrScaler.h"
 #include "YuvScaler.h"
 
 
 namespace airtime {
 
 /*!	Converts a decoded picture, in whatever format the decoder produced, to
-	B_RGB32 pixels of the size it is shown at, in one swscale pass spread
-	over several threads. */
+	B_RGB32 pixels of the size it is shown at, spread over several threads:
+	with scalers of its own for the common cases on ARM, in one swscale pass
+	otherwise. */
 class FrameRenderer {
 public:
 								FrameRenderer();
@@ -30,6 +32,8 @@ private:
 			bool				_Prepare(const AVFrame* frame, int width,
 									int height, bool hdr);
 			bool				_RenderHDR(const AVFrame* frame, uint8* bits,
+									int32 bytesPerRow, int width, int height);
+			bool				_RenderSDR(const AVFrame* frame, uint8* bits,
 									int32 bytesPerRow, int width, int height);
 			void				_PrepareToneMapping(const AVFrame* frame);
 
@@ -47,6 +51,7 @@ private:
 
 			// High dynamic range: PQ or HLG, BT.2020, shown on an ordinary
 			// display.
+			SdrScaler			fSdrScaler;		// eight-bit 4:2:0
 			YuvScaler			fScaler;		// ten-bit 4:2:0
 			std::vector<uint16>	fLinear;		// R'G'B' 16 bit, scaled, for
 												// the rest

@@ -672,6 +672,7 @@ Player::_RequestSeekLocked(bigtime_t time, bool accurate, int direction)
 	fSeekDirection = direction;
 	fPendingPosition = time;
 	fPositionPending = true;
+	fSeekRequestedAt = system_time();
 	fSeekFromVideoSerial = fVideoQueue.Serial();
 	fSeekFromAudioSerial = fAudioQueue.Serial();
 	fWakeUp.notify_all();
@@ -1672,6 +1673,8 @@ Player::_VideoDecodeLoop()
 	}
 
 	VideoFramePtr lastDropped;
+	bigtime_t lastDecodedPts = kNoTime;
+	int lastDecodedSerial = -1;
 	while (!fQuit) {
 		if (hardwareWanted != fHardwareDecoding) {
 			hardwareWanted = fHardwareDecoding;
@@ -1697,6 +1700,29 @@ Player::_VideoDecodeLoop()
 		}
 		decoder->SetHurry(_HurryLevel());
 
+		// A hardware decoder cannot leave work out to catch up, but it need
+		// not make pictures that would only be dropped: when it is far
+		// behind the clock (after a seek into a long group of pictures the
+		// sound has gone on by seconds), it is asked for none until where
+		// the clock will be by then. The Raspberry Pi's firmware decoder is
+		// twice as fast at that, and the others save their copies.
+		if (decoder->IsHardware() && lastDecodedPts != kNoTime
+			&& lastDecodedSerial == fVideoQueue.Serial()) {
+			bool valid = false;
+			bigtime_t master = _MasterClock(&valid);
+			std::lock_guard<std::mutex> lock(fLock);
+			bigtime_t behind = master - lastDecodedPts;
+			if (valid && fPlaying && !fScanning && behind > 250000
+				&& fVideoSkipSerial != lastDecodedSerial) {
+				bigtime_t target = master + behind / 2 + 100000;
+				fVideoSkipSerial = lastDecodedSerial;
+				fVideoSkipTime = target;
+				decoder->SetSkipBefore(target);
+				TRACE("airTime: the decoder is %.0f ms behind, no pictures "
+					"until %.3f\n", behind / 1000.0, target / 1e6);
+			}
+		}
+
 		VideoFramePtr frame;
 		bigtime_t decodeStart = system_time();
 		fDecodePhase = 1;
@@ -1712,6 +1738,8 @@ Player::_VideoDecodeLoop()
 		if (status == B_OK) {
 			if (frame->serial != fVideoQueue.Serial())
 				continue;
+			lastDecodedPts = frame->pts;
+			lastDecodedSerial = frame->serial;
 			if (fVideoWidth <= 0 || fVideoHeight <= 0) {
 				fVideoWidth = frame->frame->width;
 				fVideoHeight = frame->frame->height;
@@ -1924,6 +1952,12 @@ Player::_PresentLoop()
 	set_thread_priority(find_thread(NULL), B_URGENT_DISPLAY_PRIORITY);
 
 	bool coverShown = false;
+	// AIRTIME_TRACE_DROPS: say why pictures are left out
+	static const bool sTraceDrops = getenv("AIRTIME_TRACE_DROPS") != NULL;
+	bigtime_t lastShowEnd = system_time();
+	bigtime_t lastShowTime = 0;
+	bool wasPending = false;
+
 	while (!fQuit) {
 		bool playing, scanning, showNext;
 		{
@@ -1956,6 +1990,18 @@ Player::_PresentLoop()
 			}
 			fWakeUp.wait_for(lock, std::chrono::milliseconds(20));
 			continue;
+		}
+
+		if (sTraceDrops) {
+			// how long a seek takes to its first picture
+			std::lock_guard<std::mutex> lock(fLock);
+			if (wasPending && !fPositionPending) {
+				fprintf(stderr, "airTime: %.0f ms from the seek to the "
+					"picture at %.3f\n",
+					(system_time() - fSeekRequestedAt) / 1000.0,
+					fLastShownPts / 1e6);
+			}
+			wasPending = fPositionPending;
 		}
 
 		VideoFramePtr frame = fFrames.Peek();
@@ -2066,18 +2112,48 @@ Player::_PresentLoop()
 		// How late pictures are coming, for the decoder to catch up.
 		fLateness = (fLateness * 7 + std::max((bigtime_t)0, -delay)) / 8;
 
-		// Late: let it go if the next one is due as well.
+		// Late: let it go if the next one is due as well. Not after one
+		// hold-up, though: when pictures have been on time and showing them
+		// takes less than their duration, the film is back in step within a
+		// few of them, with nothing left out. (On the Raspberry Pi 4 the
+		// firmware's decoder slows all memory down several times over for 30
+		// to 100 ms now and then; every such hold-up cost a picture or two.)
+		// Sound that leads the picture by up to 90 ms is not noticed.
 		VideoFramePtr next = fFrames.Peek(1);
-		if (delay < -frame->duration && next.get() != NULL
+		bigtime_t tolerance = std::min((bigtime_t)90000, 3 * frame->duration);
+		static const bool sStrict = getenv("AIRTIME_STRICT_DROPS") != NULL;
+		bool holdUp = !sStrict && fLateness < frame->duration / 2
+			&& delay > -tolerance;
+		if (delay < -frame->duration && !holdUp && next.get() != NULL
 			&& next->serial == serial && next->pts <= master) {
 			fFrames.Pop();
 			fFramesDropped++;
+			if (sTraceDrops) {
+				fprintf(stderr, "airTime: dropped %.3f, %.1f ms late; the "
+					"last picture took %.1f ms to show, and ended %.1f ms "
+					"ago; next %.3f\n", frame->pts / 1e6, -delay / 1000.0,
+					lastShowTime / 1000.0,
+					(system_time() - lastShowEnd) / 1000.0, next->pts / 1e6);
+			}
 			std::lock_guard<std::mutex> lock(fLock);
 			fLastShownPts = frame->pts;
 			continue;
 		}
 
-		if (_Show(frame)) {
+		bigtime_t showStart = system_time();
+		if (sTraceDrops && showStart - lastShowEnd > 50000) {
+			fprintf(stderr, "airTime: %.1f ms between pictures before "
+				"%.3f (%.1f ms late)\n", (showStart - lastShowEnd) / 1000.0,
+				frame->pts / 1e6, -delay / 1000.0);
+		}
+		bool shown = _Show(frame);
+		lastShowEnd = system_time();
+		lastShowTime = lastShowEnd - showStart;
+		if (sTraceDrops && lastShowTime > 30000) {
+			fprintf(stderr, "airTime: %.1f ms to show %.3f\n",
+				lastShowTime / 1000.0, frame->pts / 1e6);
+		}
+		if (shown) {
 			fFrames.Pop();
 			std::lock_guard<std::mutex> lock(fLock);
 			fLastShownPts = frame->pts;

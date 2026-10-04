@@ -266,6 +266,7 @@ private:
 			int					fSeekDirection;	// keyframe seeks: 1 or -1
 			bigtime_t			fPendingPosition;	// until the seek shows
 			bool				fPositionPending;
+			bigtime_t			fSeekRequestedAt = 0;
 			// The queue serials when the last seek was asked for: pictures
 			// and sound from them or before belong to the old position.
 			int					fSeekFromVideoSerial;

@@ -76,11 +76,11 @@ $(HOST_BUILD)/caption_dump: tests/CaptionDump.cpp src/engine/Subtitles.cpp \
 		-o $@ $^ $(HOST_FFMPEG_LIBS) -pthread
 
 $(HOST_BUILD)/renderer_tests: tests/RendererTests.cpp src/ui/FrameRenderer.cpp \
-		src/ui/YuvScaler.cpp $(wildcard src/ui/*.h) $(wildcard tests/host/*.h)
+		src/ui/YuvScaler.cpp src/ui/SdrScaler.cpp $(wildcard src/ui/*.h) $(wildcard tests/host/*.h)
 	@mkdir -p $(HOST_BUILD)
 	$(HOST_CXX) -std=c++17 -O2 -g -Wall -Wno-multichar -Itests/host -Isrc/engine -Isrc/ui \
 		$(HOST_FFMPEG_CFLAGS) -o $@ tests/RendererTests.cpp src/ui/FrameRenderer.cpp \
-		src/ui/YuvScaler.cpp $(HOST_FFMPEG_LIBS) -pthread
+		src/ui/YuvScaler.cpp src/ui/SdrScaler.cpp $(HOST_FFMPEG_LIBS) -pthread
 
 AIRTIME_TEST_MEDIA ?= $(wildcard /mnt/HaikuWork/artifacts/airtime-media)
 export AIRTIME_TEST_MEDIA

@@ -107,6 +107,8 @@ public:
 			threads = !fFast.empty() ? (int)fFast.size()
 				: cpus > 8 ? 8 : cpus > 1 ? (int)cpus : 2;
 			fCallerWorks = fFast.empty();
+			if (getenv("AIRTIME_POOL_THREADS") != NULL)
+				threads = std::max(1, atoi(getenv("AIRTIME_POOL_THREADS")));
 		}
 		fCount = threads;
 		for (int i = fCallerWorks ? 1 : 0; i < threads; i++)

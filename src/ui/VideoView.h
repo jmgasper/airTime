@@ -72,6 +72,8 @@ public:
 
 private:
 			bool				_DrawDirect(BBitmap* bitmap, BRect rect);
+			bool				_RenderDirect(const VideoFramePtr& frame,
+									BRect rect, int width, int height);
 			float				_DirectScale();
 			bool				_DirectStillConnected();
 			static void			_DeviceRect(BRect rect, BPoint origin,
@@ -108,6 +110,8 @@ private:
 			BString				fDetail;
 			BPoint				fLastMouse;
 			std::atomic<bigtime_t> fComposeTime;
+			bigtime_t			fTraceRender = 0;
+			bigtime_t			fTraceOverlays = 0;
 			std::atomic<bigtime_t> fDrawTime;
 
 			// Direct frame buffer access, guarded by fDirectLock; the window

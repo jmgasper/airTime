@@ -72,6 +72,11 @@ const HardwareDecoderKind kKinds[] = {
 	// air/OS tree): H.264 up to 1080p, eight bit, as NV12.
 	{"rpi_mmal", "Raspberry Pi VideoCore", {{AV_CODEC_ID_H264, 1920, 1088, 8},
 		{AV_CODEC_ID_NONE, 0, 0, 0}}, 0, false},
+	// The HEVC decoder block of the Raspberry Pi 4's SoC (the rpi_hevc
+	// add-on of the air/OS tree): Main and Main 10, as I420 and P010.
+	{"rpi_hevc", "Raspberry Pi HEVC decoder",
+		{{AV_CODEC_ID_HEVC, 4096, 4096, 10}, {AV_CODEC_ID_NONE, 0, 0, 0}}, 0,
+		false},
 };
 
 // Not among Haiku's colour spaces: 4:2:0 as a plane of luma then one of Cb
@@ -621,10 +626,14 @@ public:
 			if (fKeyframesOnly && (fChunk->flags & AV_PKT_FLAG_KEY) == 0)
 				continue;
 
-			fPacketsWithoutFrame++;
 			int64 timestamp = fChunk->pts != AV_NOPTS_VALUE
 				? fChunk->pts : fChunk->dts;
 			bigtime_t time = to_micros(timestamp, fStream->time_base);
+			// Pictures before the time a seek goes to need not come out
+			// (the Raspberry Pi's firmware decoder gives none for them).
+			bigtime_t skip = fSkipBefore;
+			if (skip <= 0 || time == kNoTime || time >= skip + fStartTime)
+				fPacketsWithoutFrame++;
 			memset(header, 0, sizeof(*header));
 			header->type = B_MEDIA_ENCODED_VIDEO;
 			header->start_time = time == kNoTime ? 0 : time;

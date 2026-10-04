@@ -228,8 +228,11 @@ VideoView::_Compose(const VideoFramePtr& frame, int index, int width,
 	}
 	uint8* bits = (uint8*)bitmap->Bits();
 	int32 bytesPerRow = bitmap->BytesPerRow();
+	bigtime_t traceStart = system_time();
 	if (!fRenderer.Render(frame->frame, bits, bytesPerRow, width, height))
 		return false;
+	fTraceRender = system_time() - traceStart;
+	traceStart = system_time();
 
 	if (fPlayer != NULL && fPlayer->HasMovingVideo()) {
 		std::vector<SubtitleEventPtr> events
@@ -258,6 +261,7 @@ VideoView::_Compose(const VideoFramePtr& frame, int index, int width,
 				opacity);
 		}
 	}
+	fTraceOverlays = system_time() - traceStart;
 	return true;
 }
 
@@ -279,9 +283,20 @@ VideoView::DisplayFrame(const VideoFramePtr& frame)
 		_DeviceRect(rect, BPoint(0, 0), scale, &left, &top, &width, &height);
 	}
 
+	static const bool sTrace = getenv("AIRTIME_TRACE_DROPS") != NULL;
+	bigtime_t entered = system_time();
 	std::lock_guard<std::mutex> render(fRenderLock);
 	int next = fCurrent ^ 1;
 	bigtime_t start = system_time();
+	if (scale == 1.0f && _RenderDirect(frame, rect, width, height)) {
+		// The bitmaps do not have this picture: should the view have to
+		// draw itself, it makes it again.
+		fLastFrame = frame;
+		fDirty = true;
+		fComposeTime = (fComposeTime * 15 + (system_time() - start)) / 16;
+		fDrawTime = fDrawTime * 15 / 16;
+		return true;
+	}
 	if (!_Compose(frame, next, width, height))
 		return true;
 	fLastFrame = frame;
@@ -291,7 +306,15 @@ VideoView::DisplayFrame(const VideoFramePtr& frame)
 	if (_DrawDirect(fBitmaps[next], rect)) {
 		fCurrent = next;
 		fDirty = false;
-		fDrawTime = (fDrawTime * 15 + (system_time() - composed)) / 16;
+		bigtime_t drawn = system_time();
+		fDrawTime = (fDrawTime * 15 + (drawn - composed)) / 16;
+		if (sTrace && drawn - entered > 30000) {
+			fprintf(stderr, "airTime: slow picture: %.1f ms for the lock, "
+				"%.1f ms (%.1f + %.1f) to make it, %.1f ms to draw it\n",
+				(start - entered) / 1000.0, (composed - start) / 1000.0,
+				fTraceRender / 1000.0, fTraceOverlays / 1000.0,
+				(drawn - composed) / 1000.0);
+		}
 		return true;
 	}
 
@@ -462,6 +485,68 @@ VideoView::UpdateWindowOrigin()
 		- Window()->ConvertToScreen(BPoint(0, 0));
 	std::lock_guard<std::timed_mutex> lock(fDirectLock);
 	fWindowOrigin = origin;
+}
+
+
+/*!	Makes the picture straight in the frame buffer, when all of it is
+	visible in one piece and nothing is to be drawn over it. Making it in a
+	bitmap and copying that means twice the pixels written and once read,
+	and moving memory is what a small board is slowest at: on the Raspberry
+	Pi 4 this halves the time a picture takes.
+	AIRTIME_NO_DIRECT_RENDER leaves it off.
+*/
+bool
+VideoView::_RenderDirect(const VideoFramePtr& frame, BRect rect, int width,
+	int height)
+{
+	static const bool sDisabled = getenv("AIRTIME_NO_DIRECT_RENDER") != NULL;
+	if (sDisabled || !fDirectAllowed)
+		return false;
+
+	// subtitles or a message to blend in: that needs the bitmap
+	if (fPlayer != NULL && fPlayer->HasMovingVideo()
+		&& !fPlayer->ActiveSubtitles(frame->pts).empty()) {
+		return false;
+	}
+	{
+		std::lock_guard<std::mutex> lock(fMessageLock);
+		if (fMessage.Length() > 0 && system_time() < fMessageUntil)
+			return false;
+	}
+
+	std::lock_guard<std::timed_mutex> lock(fDirectLock);
+	if (!_DirectStillConnected() || fCovered || fDirectBits == NULL
+		|| fDirectScale != 1.0f) {
+		return false;
+	}
+
+	int left, top, deviceWidth, deviceHeight;
+	_DeviceRect(rect, fWindowOrigin, 1.0f, &left, &top, &deviceWidth,
+		&deviceHeight);
+	left += fDirectWindowBounds.left;
+	top += fDirectWindowBounds.top;
+	if (deviceWidth != width || deviceHeight != height)
+		return false;
+
+	bool whole = false;
+	for (const clipping_rect& clip : fDirectClips) {
+		if (clip.left <= left && clip.top <= top
+			&& clip.right >= left + width - 1
+			&& clip.bottom >= top + height - 1) {
+			whole = true;
+			break;
+		}
+	}
+	if (!whole)
+		return false;
+
+	if (!fRenderer.Render(frame->frame,
+			fDirectBits + (size_t)top * fDirectBytesPerRow + (size_t)left * 4,
+			fDirectBytesPerRow, width, height)) {
+		return false;
+	}
+	fDirectUsed = true;
+	return true;
 }
 
 

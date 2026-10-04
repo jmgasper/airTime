@@ -65,7 +65,7 @@ if [[ ${1:-} == tests ]]; then
 		"$ROOT/src/ui/YuvScaler.cpp" "${LINK[@]}"
 	$CXX "${TESTFLAGS[@]}" -o "$BUILD/renderer_tests" \
 		"$ROOT/tests/RendererTests.cpp" "$ROOT/src/ui/FrameRenderer.cpp" \
-		"$ROOT/src/ui/YuvScaler.cpp" "${LINK[@]}"
+		"$ROOT/src/ui/YuvScaler.cpp" "$ROOT/src/ui/SdrScaler.cpp" "${LINK[@]}"
 	echo "$BUILD/engine_tests $BUILD/renderer_tests"
 	exit 0
 fi

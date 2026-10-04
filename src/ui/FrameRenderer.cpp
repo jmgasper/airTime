@@ -196,6 +196,8 @@ FrameRenderer::Render(const AVFrame* frame, uint8* bits, int32 bytesPerRow,
 
 	if (is_hdr(frame))
 		return _RenderHDR(frame, bits, bytesPerRow, width, height);
+	if (_RenderSDR(frame, bits, bytesPerRow, width, height))
+		return true;
 
 	if (!_Prepare(frame, width, height, false))
 		return false;
@@ -231,6 +233,34 @@ FrameRenderer::Render(const AVFrame* frame, uint8* bits, int32 bytesPerRow,
 	}
 	return true;
 }
+
+/*!	Eight bit 4:2:0 with the scaler made for it, where that is the quicker
+	one: on ARM. AIRTIME_SDR_SWSCALE and AIRTIME_SDR_SCALER choose. */
+bool
+FrameRenderer::_RenderSDR(const AVFrame* frame, uint8* bits,
+	int32 bytesPerRow, int width, int height)
+{
+	bool wanted = getenv("AIRTIME_SDR_SWSCALE") == NULL;
+#if !defined(__aarch64__)
+	wanted = wanted && getenv("AIRTIME_SDR_SCALER") != NULL;
+#endif
+	if (!wanted || !SdrScaler::Handles(frame, width, height)
+		|| !fSdrScaler.Prepare(frame, width, height)) {
+		return false;
+	}
+
+	if (fPool.get() == NULL)
+		fPool.reset(new WorkerPool());
+	fPool->Run(height, [&](int first, int last) {
+		static thread_local SdrScaler::Scratch scratch;
+		for (int y = first; y < last; y++) {
+			fSdrScaler.RenderRow(frame, y, bits + (size_t)y * bytesPerRow,
+				scratch);
+		}
+	});
+	return true;
+}
+
 
 // #pragma mark - high dynamic range
 

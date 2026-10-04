@@ -28,6 +28,12 @@ it can.
     P010 for ten bits, which costs the add-on a copy (an unpacking, for ten
     bits) rather than a conversion; a 4K HDR10 film plays at 24 frames a
     second, full screen, in HEVC or AV1.
+  * **Raspberry Pi 4** — H.264 up to 1080p on the VideoCore firmware's
+    decoder (the `rpi_mmal` add-on), and HEVC Main and Main 10 up to 4K on
+    the SoC's own HEVC block (the `rpi_hevc` add-on, which does the parsing
+    the block leaves to software). Pictures come over as planes (I420;
+    P010 for ten bits). A 1080p30 film plays at 30 pictures a second in
+    either; in software HEVC managed 19 to 25.
 
   The Movie Inspector (⌘I) says which decoder is in use and, when it is the
   processor, why the hardware was not used.
@@ -38,11 +44,26 @@ it can.
   a 1080p screen takes about 11 ms a picture on the ROCK 5, where swscale
   and a separate tone mapping took 33. On x86 swscale's SIMD is quicker,
   and stays (`AIRTIME_HDR_SCALER=1` and `AIRTIME_HDR_SWSCALE=1` choose).
+* **Eight-bit pictures** are scaled to the window and made into pixels in
+  one pass as well on ARM, between their two nearest rows and samples (what
+  swscale's fast bilinear mode does): about as fast as swscale on an idle
+  Raspberry Pi 4, and half its time while a film is being decoded next to
+  it (`AIRTIME_SDR_SWSCALE=1` goes back to swscale). When nothing is to be
+  drawn over the picture and all of it is visible, it is made straight in
+  the frame buffer rather than in a bitmap that is then copied there
+  (`AIRTIME_NO_DIRECT_RENDER=1` turns that off): moving memory is what a
+  small board is slowest at.
 * **Interlaced video** (1080i broadcasts, DVDs) is deinterlaced with
   libavfilter's bwdif, a picture a field, so motion stays smooth.
 * **Keeping up**: when the processor cannot decode a film as fast as it
   plays, airTime leaves out deblocking and then unreferenced pictures until
-  it can, and sound and picture stay together.
+  it can, and sound and picture stay together. A hardware decoder that is
+  behind (after a seek far into a group of pictures, where the sound has
+  gone on) is asked for no pictures until it is level again, which it gets
+  to sooner. One hold-up of a picture or two is not answered by leaving
+  pictures out: the film is back in step within a few of them
+  (`AIRTIME_STRICT_DROPS=1` for the old way, `AIRTIME_TRACE_DROPS=1` to
+  see what holds pictures up).
 * **High density screens**: on air/OS's app_server the picture is drawn
   straight into the frame buffer at the screen's own density, so a 4K film
   on a 200% desktop keeps its detail (View ▸ Draw at Screen Density, on by
