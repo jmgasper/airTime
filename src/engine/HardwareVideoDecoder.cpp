@@ -68,6 +68,10 @@ const HardwareDecoderKind kKinds[] = {
 	{"00_rockchip_mpp", "RK3588 VPU", {{AV_CODEC_ID_H264, 8192, 4320, 8},
 		{AV_CODEC_ID_HEVC, 8192, 4320, 10}, {AV_CODEC_ID_AV1, 8192, 4320, 10},
 		{AV_CODEC_ID_NONE, 0, 0, 0}}, 0, false},
+	// The Raspberry Pi's VideoCore firmware (the rpi_mmal add-on of the
+	// air/OS tree): H.264 up to 1080p, eight bit, as NV12.
+	{"rpi_mmal", "Raspberry Pi VideoCore", {{AV_CODEC_ID_H264, 1920, 1088, 8},
+		{AV_CODEC_ID_NONE, 0, 0, 0}}, 0, false},
 };
 
 // Not among Haiku's colour spaces: 4:2:0 as a plane of luma then one of Cb
@@ -75,6 +79,10 @@ const HardwareDecoderKind kKinds[] = {
 // RK3588 add-ons) or eight (the RK3588 one, which then needs only copy).
 const color_space kColorSpaceP010 = (color_space)0x50303130;	// 'P010'
 const color_space kColorSpaceNV12 = (color_space)0x4e563132;	// 'NV12'
+// Three planes, luma then Cb then Cr, the chroma rows half of bytes_per_row
+// apart (the Raspberry Pi add-on): what libavcodec gives too, and what the
+// scaler is quickest with.
+const color_space kColorSpaceI420 = (color_space)0x49343230;	// 'I420'
 
 
 struct LoadedAddOn {
@@ -471,9 +479,11 @@ public:
 			// unpadded.
 			bool semiPlanar = fPixelFormat == AV_PIX_FMT_P010LE
 				|| fPixelFormat == AV_PIX_FMT_NV12;
+			bool planar = fPixelFormat == AV_PIX_FMT_YUV420P;
 			size_t lumaSize = fRowBytes * fHeight;
-			size_t size = semiPlanar
-				? lumaSize + fRowBytes * ((fHeight + 1) / 2) : lumaSize;
+			size_t chromaRows = (fHeight + 1) / 2;
+			size_t size = semiPlanar || planar
+				? lumaSize + fRowBytes * chromaRows : lumaSize;
 			if (fBufferPool == NULL || fBufferSize != size) {
 				av_buffer_pool_uninit(&fBufferPool);
 				fBufferPool = av_buffer_pool_init(size + 64, av_buffer_alloc);
@@ -488,6 +498,12 @@ public:
 			if (semiPlanar) {
 				picture->data[1] = picture->data[0] + lumaSize;
 				picture->linesize[1] = (int)fRowBytes;
+			} else if (planar) {
+				picture->data[1] = picture->data[0] + lumaSize;
+				picture->linesize[1] = (int)(fRowBytes / 2);
+				picture->data[2] = picture->data[1]
+					+ (fRowBytes / 2) * chromaRows;
+				picture->linesize[2] = (int)(fRowBytes / 2);
 			}
 			if (picture->linesize[0] != (int)fRowBytes) {
 				fprintf(stderr, "airTime: unexpected row length %d != %zu\n",
@@ -635,11 +651,12 @@ private:
 		media_format format;
 		status_t status = B_ERROR;
 		static const color_space kSpaces[] = {kColorSpaceP010,
-			kColorSpaceNV12, B_YCbCr422, B_RGB32};
+			kColorSpaceI420, kColorSpaceNV12, B_YCbCr422, B_RGB32};
 		const char* forced = getenv("AIRTIME_HW_RGB");
 		bool tenBit = is_ten_bit(fStream->codecpar);
 		for (color_space space : kSpaces) {
-			if ((space == B_YCbCr422 || space == kColorSpaceNV12)
+			if ((space == B_YCbCr422 || space == kColorSpaceNV12
+					|| space == kColorSpaceI420)
 				&& forced != NULL) {
 				continue;
 			}
@@ -681,6 +698,10 @@ private:
 					fPixelFormat = AV_PIX_FMT_NV12;
 					break;
 				}
+				if (display.format == kColorSpaceI420) {
+					fPixelFormat = AV_PIX_FMT_YUV420P;
+					break;
+				}
 				fprintf(stderr, "airTime: %s offers colour space %#x\n",
 					fAddOn.kind->displayName, (unsigned)display.format);
 				return B_MEDIA_BAD_FORMAT;
@@ -691,7 +712,8 @@ private:
 			fHeight = display.line_count;
 		fRowBytes = display.bytes_per_row > 0 ? display.bytes_per_row
 			: (size_t)fWidth * (fPixelFormat == AV_PIX_FMT_BGRA ? 4
-				: fPixelFormat == AV_PIX_FMT_NV12 ? 1 : 2);
+				: fPixelFormat == AV_PIX_FMT_NV12
+					|| fPixelFormat == AV_PIX_FMT_YUV420P ? 1 : 2);
 
 		media_codec_info codecInfo;
 		memset(&codecInfo, 0, sizeof(codecInfo));
