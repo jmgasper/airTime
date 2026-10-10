@@ -24,9 +24,11 @@ it can.
     in hardware: all 5,400 frames shown, none dropped, and reported A/V offset
     near zero. Sustained decoder overload still triggers software fallback.
     HEVC Main/Main 10 now selects the addon's explicit decoder index 1,
-    retaining P010 for ten-bit scaling and tone mapping. The new build passes
-    missing-device fallback (48 HEVC pictures, no drops); native HEVC playback
-    in airTime is awaiting qualification on the corrected P010 driver.
+    retaining P010 for ten-bit scaling and tone mapping. Native WX5100 tests
+    pass both 48-picture profiles and a 30-second 1080p30 Main 10/AAC clip:
+    all 900 pictures shown in hardware, no drops and normal completion.
+    The build also passes missing-device software fallback in QEMU
+    (48 HEVC pictures, no drops).
   * **GeForce** — NVDEC (the `nvdec` add-on):
     8-bit 4:2:0 progressive H.264, and HEVC Main and Main 10 up to 8K.
     Ten-bit pictures come over as P010, so HDR films keep their depth for
