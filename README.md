@@ -20,9 +20,13 @@ it can.
   * **AMD Polaris** — UVD through the air/OS `amduvd` add-on: progressive
     8-bit 4:2:0 H.264 Baseline, Main and High. Unsupported streams or an
     unavailable device fall back to libavcodec. With the qualified UVD clock
-    setup, WX5100 testing plays a 30-second 1080p30 H.264/AAC clip entirely
-    in hardware: all 900 frames shown, none dropped, and reported A/V offset
+    setup, WX5100 testing plays a three-minute 1080p30 H.264/AAC clip entirely
+    in hardware: all 5,400 frames shown, none dropped, and reported A/V offset
     near zero. Sustained decoder overload still triggers software fallback.
+    HEVC Main/Main 10 now selects the addon's explicit decoder index 1,
+    retaining P010 for ten-bit scaling and tone mapping. The new build passes
+    missing-device fallback (48 HEVC pictures, no drops); native HEVC playback
+    in airTime is awaiting qualification on the corrected P010 driver.
   * **GeForce** — NVDEC (the `nvdec` add-on):
     8-bit 4:2:0 progressive H.264, and HEVC Main and Main 10 up to 8K.
     Ten-bit pictures come over as P010, so HDR films keep their depth for
