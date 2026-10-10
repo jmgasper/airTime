@@ -56,6 +56,14 @@ struct HardwareDecoderKind {
 };
 
 const HardwareDecoderKind kKinds[] = {
+	// Polaris UVD in the air/OS amdgpu driver. The add-on registers no
+	// Media Kit formats, so airTime owns selection and software fallback.
+	{"amduvd", "AMD UVD", {{AV_CODEC_ID_H264, 4096, 4096, 8},
+		{AV_CODEC_ID_NONE, 0, 0, 0}}, 16, false, 0},
+	// The same addon exposes Main/Main 10 at index 1, retaining P010
+	// precision for ten-bit scaling and tone mapping in the player.
+	{"amduvd", "AMD UVD", {{AV_CODEC_ID_HEVC, 4096, 4096, 10},
+		{AV_CODEC_ID_NONE, 0, 0, 0}}, 0, false, 1},
 	// The NVDEC add-on of this fork: eight bit 4:2:0 progressive H.264, and
 	// HEVC Main and Main 10 (which the add-on does not offer the Media Kit:
 	// it is only asked here, where a refusal falls back to libavcodec).
@@ -261,6 +269,12 @@ stream_is_eligible(const LoadedAddOn& addOn, AVStream* stream,
 			parameters->extradata_size);
 		if (find_h264_sps(parameters->extradata, parameters->extradata_size,
 				lengthSize, &info)) {
+			if (strcmp(kind.leafName, "amduvd") == 0
+				&& info.profile != 66 && info.profile != 77 && info.profile != 100) {
+				reason->SetToFormat("%s decodes H.264 Baseline, Main and High only",
+					kind.displayName);
+				return false;
+			}
 			if (info.chromaFormat != 1 || info.bitDepthLuma != 8
 				|| info.bitDepthChroma != 8) {
 				reason->SetToFormat("%s decodes 8 bit 4:2:0 H.264 only",

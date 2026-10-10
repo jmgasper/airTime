@@ -17,7 +17,20 @@ it can.
 * **Hardware decoding** through the Media Kit's decoder add-ons, which airTime
   loads itself so that it can choose them and fall back to libavcodec when
   one refuses a stream:
-  * **X399 workstation** — NVDEC on the GeForce card (the `nvdec` add-on):
+  * **AMD Polaris** — UVD through the air/OS `amduvd` add-on: progressive
+    8-bit 4:2:0 H.264 Baseline, Main and High. Unsupported streams or an
+    unavailable device fall back to libavcodec. With the qualified UVD clock
+    setup, WX5100 testing plays a three-minute 1080p30 H.264/AAC clip entirely
+    in hardware: all 5,400 frames shown, none dropped, and reported A/V offset
+    near zero. Sustained decoder overload still triggers software fallback.
+    HEVC Main/Main 10 now selects the addon's explicit decoder index 1,
+    retaining P010 for ten-bit scaling and tone mapping. Native WX5100 tests
+    pass both 48-picture profiles and a three-minute 1080p30 Main 10/AAC clip:
+    all 5,400 pictures shown in hardware, no drops and normal completion.
+    Paused seeking also preserves the selected picture and resumes normally.
+    The build also passes missing-device software fallback in QEMU
+    (48 HEVC pictures, no drops).
+  * **GeForce** — NVDEC (the `nvdec` add-on):
     8-bit 4:2:0 progressive H.264, and HEVC Main and Main 10 up to 8K.
     Ten-bit pictures come over as P010, so HDR films keep their depth for
     the tone mapping; a 4K HDR10 film plays at 24 frames a second with about
@@ -71,7 +84,9 @@ it can.
   to sooner. One hold-up of a picture or two is not answered by leaving
   pictures out: the film is back in step within a few of them
   (`AIRTIME_STRICT_DROPS=1` for the old way, `AIRTIME_TRACE_DROPS=1` to
-  see what holds pictures up).
+  see what holds pictures up). A hardware decoder that remains slower than
+  the film despite buffered input is replaced by libavcodec. Playback
+  resumes at the audio clock, and the Inspector explains the switch.
 * **High density screens**: on air/OS's app_server the picture is drawn
   straight into the frame buffer at the screen's own density, so a 4K film
   on a 200% desktop keeps its detail (View ▸ Draw at Screen Density, on by
