@@ -178,7 +178,8 @@ private:
 			void				_StartAudioThread();
 			void				_StopAudioThread();
 			bool				_CreateVideoDecoder();
-			void				_FallBackToSoftware(const char* why);
+			void				_FallBackToSoftware(const char* why,
+								bigtime_t resumeTime = kNoTime);
 
 			bigtime_t			_MasterClock(bool* valid);
 			bigtime_t			_MasterClockPosition();

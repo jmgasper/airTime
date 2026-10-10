@@ -20,8 +20,8 @@ it can.
   * **AMD Polaris** — UVD through the air/OS `amduvd` add-on: progressive
     8-bit 4:2:0 H.264 Baseline, Main and High. Unsupported streams or an
     unavailable device fall back to libavcodec. Initial WX5100 testing plays
-    a 320×240 clip and its replay with no dropped frames; 1080p playback
-    performance and A/V sync are still being qualified.
+    a 320×240 clip and its replay with no dropped frames. The current driver
+    is too slow for 1080p30; airTime detects that and continues in software.
   * **GeForce** — NVDEC (the `nvdec` add-on):
     8-bit 4:2:0 progressive H.264, and HEVC Main and Main 10 up to 8K.
     Ten-bit pictures come over as P010, so HDR films keep their depth for
@@ -76,7 +76,9 @@ it can.
   to sooner. One hold-up of a picture or two is not answered by leaving
   pictures out: the film is back in step within a few of them
   (`AIRTIME_STRICT_DROPS=1` for the old way, `AIRTIME_TRACE_DROPS=1` to
-  see what holds pictures up).
+  see what holds pictures up). A hardware decoder that remains slower than
+  the film despite buffered input is replaced by libavcodec. Playback
+  resumes at the audio clock, and the Inspector explains the switch.
 * **High density screens**: on air/OS's app_server the picture is drawn
   straight into the frame buffer at the screen's own density, so a 4K film
   on a 200% desktop keeps its detail (View ▸ Draw at Screen Density, on by

@@ -1577,7 +1577,7 @@ Player::_CreateVideoDecoder()
 
 
 void
-Player::_FallBackToSoftware(const char* why)
+Player::_FallBackToSoftware(const char* why, bigtime_t resumeTime)
 {
 	fprintf(stderr, "airTime: hardware decoding stopped (%s); continuing "
 		"with libavcodec\n", why);
@@ -1599,8 +1599,14 @@ Player::_FallBackToSoftware(const char* why)
 		// The packets the hardware swallowed are gone: read them again.
 		std::lock_guard<std::mutex> lock(fLock);
 		bigtime_t position = fPositionPending ? fPendingPosition
-			: fLastShownPts;
+			: resumeTime != kNoTime ? resumeTime : fLastShownPts;
 		_RequestSeekLocked(position, true, 0);
+		// Reassess the new decoder at full quality; the old one's backlog
+		// must not make software skip pictures for several more seconds.
+		fHurry = 0;
+		fHurryChanged = system_time();
+		fHurryPatience = 3000000;
+		fHurryEased = 0;
 		fShowNextFrame = true;
 	}
 	_Notify(kMsgPlayerDecoderChanged);
@@ -1675,8 +1681,15 @@ Player::_VideoDecodeLoop()
 	VideoFramePtr lastDropped;
 	bigtime_t lastDecodedPts = kNoTime;
 	int lastDecodedSerial = -1;
+	int speedSerial = -1;
+	unsigned speedFrames = 0;
+	bigtime_t speedSpent = 0, speedDuration = 0;
+	auto resetSpeed = [&]() {
+		speedFrames = 0; speedSpent = speedDuration = 0;
+	};
 	while (!fQuit) {
 		if (hardwareWanted != fHardwareDecoding) {
+			resetSpeed();
 			hardwareWanted = fHardwareDecoding;
 			_CreateVideoDecoder();
 			std::lock_guard<std::mutex> lock(fLock);
@@ -1724,20 +1737,59 @@ Player::_VideoDecodeLoop()
 		}
 
 		VideoFramePtr frame;
+		bool inputReady = fVideoQueue.Count() >= 8;
 		bigtime_t decodeStart = system_time();
 		fDecodePhase = 1;
 		status_t status = decoder->Decode(frame);
 		fDecodePhase = 2;
 		if (fQuit)
 			break;
+		bigtime_t spent = system_time() - decodeStart;
 		if (status == B_OK) {
-			bigtime_t spent = system_time() - decodeStart;
 			fDecodeTime = (fDecodeTime * 15 + spent) / 16;
-		}
+		} else
+			resetSpeed();
 
 		if (status == B_OK) {
 			if (frame->serial != fVideoQueue.Serial())
 				continue;
+			// A decoder can accept every packet yet be too slow to play the
+			// film. Measure only ordinary playback with buffered input, after
+			// eight warm-up pictures in this seek generation. Network waits,
+			// pause, scanning and accelerated playback are not decoder tests.
+			bool measureSpeed;
+			{
+				std::lock_guard<std::mutex> lock(fLock);
+				measureSpeed = fPlaying && !fScanning && !fPositionPending
+					&& fabs(fRate - 1.0) < 0.001;
+			}
+			measureSpeed = measureSpeed && decoder->IsHardware() && inputReady
+				&& fVideoQueue.Count() >= 8 && frame->duration > 0;
+			if (speedSerial != frame->serial || !measureSpeed) {
+				resetSpeed();
+				speedSerial = frame->serial;
+			}
+			if (measureSpeed && ++speedFrames > 8) {
+				speedSpent += spent;
+				speedDuration += frame->duration;
+				if (speedFrames >= 40) {
+					bool valid;
+					bigtime_t master = _MasterClock(&valid);
+					if (valid && master - frame->pts > 250000
+						&& speedSpent > speedDuration * 5 / 4) {
+						BString why;
+						why.SetToFormat("%s cannot keep up with this film",
+							decoder->Name().String());
+						_FallBackToSoftware(why.String(), master);
+						lastDropped.reset();
+						lastDecodedPts = kNoTime;
+						resetSpeed();
+						continue;
+					}
+					speedFrames = 8;
+					speedSpent = speedDuration = 0;
+				}
+			}
 			lastDecodedPts = frame->pts;
 			lastDecodedSerial = frame->serial;
 			if (fVideoWidth <= 0 || fVideoHeight <= 0) {
