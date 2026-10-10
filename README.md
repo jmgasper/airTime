@@ -8,6 +8,19 @@ it can.
 
 ![airTime icon](resources/branding/airtime-icon.svg)
 
+<!-- airos-ci:latest-builds:start -->
+## Latest builds
+
+Built automatically by air/OS CI from commit `5c2c4c8` on 2026-10-05 ([all files](https://github.com/jmgasper/airTime/releases/tag/latest)).
+
+| Architecture | Package |
+|---|---|
+| arm64 | [airtime-1.0.0-14-arm64.hpkg](https://github.com/jmgasper/airTime/releases/download/latest/airtime-1.0.0-14-arm64.hpkg) |
+| x86_64 | [airtime-1.0.0-14-x86_64.hpkg](https://github.com/jmgasper/airTime/releases/download/latest/airtime-1.0.0-14-x86_64.hpkg) |
+
+Install with `pkgman install <file>`, or copy the file into `/boot/system/packages`. Haiku SDK: x86_64 hrev60206-669-g9dc439ceeb, arm64 hrev60206-669-g9dc439ceeb.
+<!-- airos-ci:latest-builds:end -->
+
 ## What it does
 
 * **Everything FFmpeg reads**: MP4/MOV, Matroska/WebM, AVI, MPEG transport
