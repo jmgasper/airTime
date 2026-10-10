@@ -34,12 +34,14 @@ it can.
     the block leaves to software). Pictures come over as planes (I420;
     P010 for ten bits). A 1080p30 film plays at 30 pictures a second in
     either; in software HEVC managed 19 to 25.
-  * **Radxa Cubie A7S** — H.264 and HEVC Main up to 4096 wide on the
-    Allwinner A733's Cedar engine (the `sunxi_cedar` add-on, which does the
-    parsing the engine leaves to software), as I420. 1080p30 films play at
-    30 pictures a second with none dropped and half a core busy in all;
-    in software H.264 takes 2.4 cores, and HEVC 3.8 to 4.3, at times
-    falling behind.
+  * **Radxa Cubie A7S** — H.264, and HEVC Main and Main 10, up to 4096 wide
+    on the Allwinner A733's Cedar engine (the `sunxi_cedar` add-on, which
+    does the parsing the engine leaves to software), as I420 (P010 for ten
+    bits). 1080p30 films play at 30 pictures a second with none dropped
+    and half a core busy in all; in software H.264 takes 2.4 cores, and
+    HEVC 3.8 to 4.3, at times falling behind. A 1080p30 Main 10 film plays
+    at 30 with none dropped and three cores busy; in software it manages
+    11.
 
   The Movie Inspector (⌘I) says which decoder is in use and, when it is the
   processor, why the hardware was not used.

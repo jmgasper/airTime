@@ -82,10 +82,11 @@ const HardwareDecoderKind kKinds[] = {
 		{{AV_CODEC_ID_HEVC, 4096, 4096, 10}, {AV_CODEC_ID_NONE, 0, 0, 0}}, 0,
 		false, 0},
 	// The Cedar video engine of the Allwinner A733 (the sunxi_cedar add-on
-	// of the air/OS tree, Radxa Cubie A7S): progressive eight bit 4:2:0
-	// H.264 and HEVC Main up to 4096 wide, as I420 and NV12.
+	// of the air/OS tree, Radxa Cubie A7S): progressive 4:2:0 H.264 (eight
+	// bit), and HEVC Main and Main 10, up to 4096 wide; I420 and NV12, and
+	// P010 for ten bits.
 	{"sunxi_cedar", "Allwinner Cedar", {{AV_CODEC_ID_H264, 4096, 2304, 8},
-		{AV_CODEC_ID_HEVC, 4096, 2304, 8}, {AV_CODEC_ID_NONE, 0, 0, 0}}, 0,
+		{AV_CODEC_ID_HEVC, 4096, 2304, 10}, {AV_CODEC_ID_NONE, 0, 0, 0}}, 0,
 		false, 1},
 };
 
