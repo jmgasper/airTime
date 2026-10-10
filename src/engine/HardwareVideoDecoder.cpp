@@ -49,6 +49,10 @@ struct HardwareDecoderKind {
 	// The NVDEC add-on writes Cb Y0 Cr Y1 where Haiku's B_YCbCr422 means
 	// Y0 Cb Y1 Cr.
 	bool			chromaFirst;
+	// What NewDecoder() is asked for: sunxi_cedar's decoder 0 goes on in
+	// software when the engine refuses a stream (for the Media Kit's
+	// users), its decoder 1 refuses, and airTime falls back itself.
+	uint			decoderIndex;
 };
 
 const HardwareDecoderKind kKinds[] = {
@@ -60,23 +64,29 @@ const HardwareDecoderKind kKinds[] = {
 	// so with an older one those streams go to libavcodec.
 	{"nvdec", "NVDEC", {{AV_CODEC_ID_H264, 4096, 4096, 8},
 		{AV_CODEC_ID_HEVC, 8192, 8192, 10}, {AV_CODEC_ID_NONE, 0, 0, 0}},
-		15, true},
+		15, true, 0},
 	// Rockchip MPP on the RK3588: RKVDEC for H.264 and HEVC (Main and
 	// Main 10), VPU981 for AV1 (Main, eight and ten bits), 4:2:0. Ten-bit
 	// pictures come over as P010; an add-on too old to give them fails the
 	// stream, which then goes to libavcodec.
 	{"00_rockchip_mpp", "RK3588 VPU", {{AV_CODEC_ID_H264, 8192, 4320, 8},
 		{AV_CODEC_ID_HEVC, 8192, 4320, 10}, {AV_CODEC_ID_AV1, 8192, 4320, 10},
-		{AV_CODEC_ID_NONE, 0, 0, 0}}, 0, false},
+		{AV_CODEC_ID_NONE, 0, 0, 0}}, 0, false, 0},
 	// The Raspberry Pi's VideoCore firmware (the rpi_mmal add-on of the
 	// air/OS tree): H.264 up to 1080p, eight bit, as NV12.
 	{"rpi_mmal", "Raspberry Pi VideoCore", {{AV_CODEC_ID_H264, 1920, 1088, 8},
-		{AV_CODEC_ID_NONE, 0, 0, 0}}, 0, false},
+		{AV_CODEC_ID_NONE, 0, 0, 0}}, 0, false, 0},
 	// The HEVC decoder block of the Raspberry Pi 4's SoC (the rpi_hevc
 	// add-on of the air/OS tree): Main and Main 10, as I420 and P010.
 	{"rpi_hevc", "Raspberry Pi HEVC decoder",
 		{{AV_CODEC_ID_HEVC, 4096, 4096, 10}, {AV_CODEC_ID_NONE, 0, 0, 0}}, 0,
-		false},
+		false, 0},
+	// The Cedar video engine of the Allwinner A733 (the sunxi_cedar add-on
+	// of the air/OS tree, Radxa Cubie A7S): progressive eight bit 4:2:0
+	// H.264 and HEVC Main up to 4096 wide, as I420 and NV12.
+	{"sunxi_cedar", "Allwinner Cedar", {{AV_CODEC_ID_H264, 4096, 2304, 8},
+		{AV_CODEC_ID_HEVC, 4096, 2304, 8}, {AV_CODEC_ID_NONE, 0, 0, 0}}, 0,
+		false, 1},
 };
 
 // Not among Haiku's colour spaces: 4:2:0 as a plane of luma then one of Cb
@@ -402,7 +412,7 @@ public:
 		output.display.line_offset = 0;
 		output.display.flags = 0;
 
-		fDecoder = fAddOn.plugin->NewDecoder(0);
+		fDecoder = fAddOn.plugin->NewDecoder(fAddOn.kind->decoderIndex);
 		if (fDecoder == NULL) {
 			reason->SetTo("the add-on made no decoder");
 			return B_NO_MEMORY;
