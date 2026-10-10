@@ -17,7 +17,12 @@ it can.
 * **Hardware decoding** through the Media Kit's decoder add-ons, which airTime
   loads itself so that it can choose them and fall back to libavcodec when
   one refuses a stream:
-  * **X399 workstation** — NVDEC on the GeForce card (the `nvdec` add-on):
+  * **AMD Polaris** — UVD through the air/OS `amduvd` add-on: progressive
+    8-bit 4:2:0 H.264 Baseline, Main and High. Unsupported streams or an
+    unavailable device fall back to libavcodec. Initial WX5100 testing plays
+    a 320×240 clip and its replay with no dropped frames; 1080p playback
+    performance and A/V sync are still being qualified.
+  * **GeForce** — NVDEC (the `nvdec` add-on):
     8-bit 4:2:0 progressive H.264, and HEVC Main and Main 10 up to 8K.
     Ten-bit pictures come over as P010, so HDR films keep their depth for
     the tone mapping; a 4K HDR10 film plays at 24 frames a second with about
