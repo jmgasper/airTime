@@ -25,8 +25,9 @@ it can.
     near zero. Sustained decoder overload still triggers software fallback.
     HEVC Main/Main 10 now selects the addon's explicit decoder index 1,
     retaining P010 for ten-bit scaling and tone mapping. Native WX5100 tests
-    pass both 48-picture profiles and a 30-second 1080p30 Main 10/AAC clip:
-    all 900 pictures shown in hardware, no drops and normal completion.
+    pass both 48-picture profiles and a three-minute 1080p30 Main 10/AAC clip:
+    all 5,400 pictures shown in hardware, no drops and normal completion.
+    Paused seeking also preserves the selected picture and resumes normally.
     The build also passes missing-device software fallback in QEMU
     (48 HEVC pictures, no drops).
   * **GeForce** — NVDEC (the `nvdec` add-on):
